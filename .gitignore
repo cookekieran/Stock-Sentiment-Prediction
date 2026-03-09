@@ -1,0 +1,12 @@
+*.env
+.ipynb_checkpoints/
+.vscode/
+FiQa/
+FinancialPhraseBank-v1.0/
+*.msg
+_MACOSX/
+__pycache__/
+*.bat
+scrap.py 
+*.csv
+*.parquet
