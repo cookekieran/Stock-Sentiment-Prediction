@@ -25,5 +25,6 @@ dependencies:
       - shap
       - tqdm
       - yfinance
-      - transformers
       - psycopg2-binary
+      - transformers==4.38.2
+      - peft==0.10.0
