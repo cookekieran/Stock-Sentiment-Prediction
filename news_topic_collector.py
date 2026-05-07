@@ -110,7 +110,7 @@ for i in range(25):
         break
     
     # request n days at a time
-    n = 30
+    n = 3
     window_end = min(current_pointer + timedelta(days=n), end_goal)
 
     t_from = current_pointer.strftime("%Y%m%dT%H%M")
