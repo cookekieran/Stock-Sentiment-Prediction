@@ -2,7 +2,7 @@
 This script runs daily at midday and takes all the stock data on my desired tickers from yesterday. Data is saved into an SQL database so can be accessed later.
 """
 
-from yfinance_data import get_stock_data
+from yfinance_data_1m import get_stock_data
 from alpaca_api import get_news
 from datetime import date, timedelta
 import pandas as pd
