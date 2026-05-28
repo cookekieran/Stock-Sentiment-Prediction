@@ -56,8 +56,32 @@ daily ticker signal, then lets a temporal model update a hidden market state ove
 time. This better matches the idea that one article should nudge the state,
 rather than single-handedly flip the regime.
 
+To use DeepSeek as the news interpreter, first create article-level DeepSeek
+features. This runs the frozen model once per unique article and saves compact
+numeric features:
+
 ```powershell
-python src\data\build_latent_state_dataset.py
+python src\data\build_deepseek_news_features.py `
+  --input-path data\processed\ltn_all.parquet `
+  --output-path data\processed\deepseek_article_features.parquet `
+  --batch-size 8 `
+  --max-length 256 `
+  --projection-dim 32
+```
+
+For a tiny smoke test:
+
+```powershell
+python src\data\build_deepseek_news_features.py `
+  --max-articles 100 `
+  --output-path data\processed\deepseek_article_features_smoke.parquet
+```
+
+Then build the daily latent-state dataset with those DeepSeek features merged in:
+
+```powershell
+python src\data\build_latent_state_dataset.py `
+  --deepseek-features-path data\processed\deepseek_article_features.parquet
 ```
 
 Outputs:

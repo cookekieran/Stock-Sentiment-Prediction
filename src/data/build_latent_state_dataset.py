@@ -48,6 +48,11 @@ NEWS_FEATURE_COLUMNS = [
     "news_neutral_share",
 ]
 
+DEEPSEEK_AGGREGATE_PREFIXES = [
+    "deepseek_mean_",
+    "deepseek_relevance_weighted_",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,6 +72,16 @@ def parse_args() -> argparse.Namespace:
         "--schema-path",
         type=Path,
         default=Path("data/processed/latent_state_schema.json"),
+    )
+    parser.add_argument(
+        "--deepseek-features-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional article-level DeepSeek features created by "
+            "build_deepseek_news_features.py. If provided, these are merged by article_uid "
+            "and aggregated into daily news features."
+        ),
     )
     parser.add_argument(
         "--relevance-threshold",
@@ -133,6 +148,15 @@ def aggregate_day(group: pd.DataFrame, relevance_threshold: float) -> pd.Series:
     }
     out.update(sentiment_shares(sentiment_label_col))
 
+    deepseek_columns = [column for column in group.columns if column.startswith("deepseek_")]
+    for column in deepseek_columns:
+        values = numeric(group[column])
+        out[f"deepseek_mean_{column.removeprefix('deepseek_')}"] = float(values.mean())
+        out[f"deepseek_relevance_weighted_{column.removeprefix('deepseek_')}"] = weighted_mean(
+            values,
+            relevance,
+        )
+
     first = group.sort_values(["time_published", "article_uid"]).iloc[0]
     stable_columns = [
         "month",
@@ -196,6 +220,11 @@ def feature_columns(daily: pd.DataFrame) -> list[str]:
     candidates = [
         "news_log_article_count",
         *NEWS_FEATURE_COLUMNS,
+        *[
+            column
+            for column in sorted(daily.columns)
+            if any(column.startswith(prefix) for prefix in DEEPSEEK_AGGREGATE_PREFIXES)
+        ],
         *PRICE_FEATURE_COLUMNS,
         *macro_columns,
     ]
@@ -249,6 +278,12 @@ def print_summary(daily: pd.DataFrame) -> None:
 def main() -> None:
     args = parse_args()
     df = pd.read_parquet(args.input_path)
+    if args.deepseek_features_path:
+        deepseek = pd.read_parquet(args.deepseek_features_path)
+        if "article_uid" not in deepseek.columns:
+            raise ValueError(f"DeepSeek features must contain article_uid: {args.deepseek_features_path}")
+        df = df.merge(deepseek, on="article_uid", how="left", validate="many_to_one")
+        print(f"Merged DeepSeek article features: {args.deepseek_features_path}")
     daily = build_daily_dataset(df, args.relevance_threshold)
     write_outputs(daily, args.output_dir, args.schema_path)
     print_summary(daily)
