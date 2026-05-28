@@ -26,4 +26,4 @@ realtime data/
 .npm/
 .ssh/
 .ipython/
-data/
+/data/
