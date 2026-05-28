@@ -326,8 +326,47 @@ def evaluate(model: LatentStateGRU, dataset: DailySequenceDataset, batch_size: i
     return report
 
 
+def majority_baseline_report(dataset: DailySequenceDataset, majority_class: int) -> dict:
+    y_true = sequence_labels(dataset)
+    y_pred = np.full_like(y_true, fill_value=majority_class)
+    report = classification_report(y_true, y_pred)
+    report["prediction_counts"] = {
+        LABEL_NAMES[idx]: int((y_pred == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    report["truth_counts"] = {
+        LABEL_NAMES[idx]: int((y_true == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    return report
+
+
+def current_regime_baseline_report(dataset: DailySequenceDataset) -> dict | None:
+    idx = feature_index(dataset.feature_columns, "price_trend_id")
+    if idx is None:
+        return None
+    y_true = sequence_labels(dataset)
+    y_pred = []
+    for _, end in dataset.indices:
+        y_pred.append(int(round(float(dataset.raw[end - 1, idx]))))
+    y_pred = np.asarray(y_pred, dtype=np.int64).clip(0, len(LABEL_NAMES) - 1)
+    report = classification_report(y_true, y_pred)
+    report["prediction_counts"] = {
+        LABEL_NAMES[idx]: int((y_pred == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    report["truth_counts"] = {
+        LABEL_NAMES[idx]: int((y_true == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    return report
+
+
 def format_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{label}={counts.get(label, 0)}" for label in LABEL_NAMES)
+
+
+def print_report_summary(name: str, report: dict) -> None:
+    print(f"{name}_accuracy={report['accuracy']:.4f} {name}_macro_f1={report['macro_f1']:.4f}")
+    if "truth_counts" in report and "prediction_counts" in report:
+        print(f"  {name} truth: {format_counts(report['truth_counts'])}")
+        print(f"  {name} pred : {format_counts(report['prediction_counts'])}")
 
 
 def main() -> None:
@@ -368,7 +407,14 @@ def main() -> None:
     print(f"test sequences: {len(test_set)}")
     print(f"train label counts: {format_counts(evaluate_label_counts(train_set))}")
     print(f"validation label counts: {format_counts(evaluate_label_counts(validation_set))}")
+    print(f"test label counts: {format_counts(evaluate_label_counts(test_set))}")
     print(f"sampler={args.sampler} class_weighting={args.class_weighting}")
+
+    train_majority = int(np.bincount(sequence_labels(train_set), minlength=3).argmax())
+    print_report_summary("validation_majority_baseline", majority_baseline_report(validation_set, train_majority))
+    test_current_baseline = current_regime_baseline_report(test_set)
+    if test_current_baseline is not None:
+        print_report_summary("test_current_regime_baseline", test_current_baseline)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     best_macro_f1 = -1.0
@@ -451,7 +497,7 @@ def main() -> None:
         },
     )
     write_json(args.output_dir / "test_metrics.json", test_report)
-    print(f"test_accuracy={test_report['accuracy']:.4f} test_macro_f1={test_report['macro_f1']:.4f}")
+    print_report_summary("test", test_report)
 
 
 if __name__ == "__main__":
