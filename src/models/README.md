@@ -1,8 +1,8 @@
-# DeepSeek + LTN Experiment Workflow
+# Market Regime Experiment Workflow
 
 Run these commands from the project root.
 
-## 1. Build the dataset
+## 1. Build the article-level dataset
 
 Local files:
 
@@ -49,7 +49,64 @@ The supervised target is `future_price_trend_id`:
 - `1`: `sideways`
 - `2`: `bull_rally`
 
-## 2. Train the DeepSeek-only baseline
+## 2. Build the latent-state daily dataset
+
+This is the newer project direction. It aggregates many article rows into one
+daily ticker signal, then lets a temporal model update a hidden market state over
+time. This better matches the idea that one article should nudge the state,
+rather than single-handedly flip the regime.
+
+```powershell
+python src\data\build_latent_state_dataset.py
+```
+
+Outputs:
+
+- `data/processed/latent_state_daily.parquet`
+- `data/processed/latent_state_train.parquet`
+- `data/processed/latent_state_validation.parquet`
+- `data/processed/latent_state_test.parquet`
+- `data/processed/latent_state_schema.json`
+
+The latent-state features deliberately exclude forward-looking inputs such as
+`next_day_return`, `three_day_return`, `market_sentiment_id`, and
+`is_market_material`. Those fields are useful diagnostics, but using them as
+inputs makes the task less honest.
+
+## 3. Train the latent-state GRU model
+
+```powershell
+python src\models\train_latent_state_gru.py `
+  --sequence-length 20 `
+  --epochs 25 `
+  --smoothness-weight 0.05 `
+  --logic-weight 0.05
+```
+
+The GRU hidden state is updated daily from:
+
+- aggregated news intensity/relevance/sentiment
+- macroeconomic features
+- known price/trend context at the anchor date
+
+The additional losses encode the project idea:
+
+- `smoothness_weight`: discourages abrupt regime probability jumps when the
+  daily signal is calm
+- `logic_weight`: softly regularises economically plausible transitions, e.g.
+  tightening plus negative relevant news should raise bearish probability
+
+For a quick smoke test:
+
+```powershell
+python src\models\train_latent_state_gru.py `
+  --sequence-length 5 `
+  --epochs 1 `
+  --hidden-size 16 `
+  --batch-size 16
+```
+
+## 4. Train the old DeepSeek-only baseline
 
 ```powershell
 python src\models\train_deepseek_baseline.py `
@@ -68,7 +125,7 @@ python src\models\train_deepseek_baseline.py `
   --epochs 1
 ```
 
-## 3. Train the DeepSeek+LTN model
+## 5. Train the old DeepSeek+LTN model
 
 ```powershell
 python src\models\train_deepseek_ltn.py `
@@ -77,7 +134,11 @@ python src\models\train_deepseek_ltn.py `
   --logic-weight 0.2
 ```
 
-## 4. Compare experiments
+The DeepSeek+LTN model is still useful as a comparison, but it is article-level:
+each article is treated as a separate supervised example. It does not maintain a
+continuous hidden market state.
+
+## 6. Compare experiments
 
 ```powershell
 python src\models\compare_experiments.py
