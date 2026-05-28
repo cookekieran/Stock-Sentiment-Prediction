@@ -41,6 +41,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--smoothness-weight", type=float, default=0.05)
     parser.add_argument("--logic-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--sampler",
+        choices=["natural", "balanced"],
+        default="natural",
+        help="Use chronological/natural class frequency or balanced replacement sampling.",
+    )
+    parser.add_argument(
+        "--class-weighting",
+        choices=["none", "inverse", "sqrt_inverse"],
+        default="sqrt_inverse",
+        help="Class weighting for cross-entropy on final regime labels.",
+    )
+    parser.add_argument(
+        "--diagnostics-every",
+        type=int,
+        default=1,
+        help="Print validation prediction distribution every N epochs. Use 0 to disable.",
+    )
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -135,12 +153,17 @@ def sequence_labels(dataset: DailySequenceDataset) -> np.ndarray:
     return np.array([dataset.y[end - 1] for _, end in dataset.indices], dtype=np.int64)
 
 
-def make_loader(dataset: DailySequenceDataset, batch_size: int, balanced: bool):
+def evaluate_label_counts(dataset: DailySequenceDataset) -> dict[str, int]:
+    labels = sequence_labels(dataset)
+    return {LABEL_NAMES[idx]: int((labels == idx).sum()) for idx in range(len(LABEL_NAMES))}
+
+
+def make_loader(dataset: DailySequenceDataset, batch_size: int, sampler: str):
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
 
-    if not balanced:
-        return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    if sampler == "natural":
+        return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     labels = sequence_labels(dataset)
     counts = np.bincount(labels, minlength=3).astype(np.float32)
@@ -152,6 +175,23 @@ def make_loader(dataset: DailySequenceDataset, batch_size: int, balanced: bool):
         replacement=True,
     )
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+
+
+def class_weight_tensor(labels: np.ndarray, mode: str, device):
+    import torch
+
+    if mode == "none":
+        return None
+    counts = np.bincount(labels, minlength=3).astype(np.float32)
+    counts[counts == 0.0] = 1.0
+    if mode == "inverse":
+        weights = counts.sum() / (len(counts) * counts)
+    elif mode == "sqrt_inverse":
+        weights = np.sqrt(counts.sum() / (len(counts) * counts))
+    else:
+        raise ValueError(f"Unknown class weighting mode: {mode}")
+    weights = weights / weights.mean()
+    return torch.as_tensor(weights, dtype=torch.float32, device=device)
 
 
 class LatentStateGRU:
@@ -274,7 +314,20 @@ def evaluate(model: LatentStateGRU, dataset: DailySequenceDataset, batch_size: i
             logits, _ = model.logits(x)
             preds.append(logits.argmax(dim=1).cpu().numpy())
             truth.append(y.numpy())
-    return classification_report(np.concatenate(truth), np.concatenate(preds))
+    y_true = np.concatenate(truth)
+    y_pred = np.concatenate(preds)
+    report = classification_report(y_true, y_pred)
+    report["prediction_counts"] = {
+        LABEL_NAMES[idx]: int((y_pred == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    report["truth_counts"] = {
+        LABEL_NAMES[idx]: int((y_true == idx).sum()) for idx in range(len(LABEL_NAMES))
+    }
+    return report
+
+
+def format_counts(counts: dict[str, int]) -> str:
+    return ", ".join(f"{label}={counts.get(label, 0)}" for label in LABEL_NAMES)
 
 
 def main() -> None:
@@ -306,8 +359,16 @@ def main() -> None:
     )
     torch = model.torch
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    criterion = torch.nn.CrossEntropyLoss()
-    train_loader = make_loader(train_set, args.batch_size, balanced=True)
+    weights = class_weight_tensor(sequence_labels(train_set), args.class_weighting, model.device)
+    criterion = torch.nn.CrossEntropyLoss(weight=weights)
+    train_loader = make_loader(train_set, args.batch_size, sampler=args.sampler)
+
+    print(f"train sequences: {len(train_set)}")
+    print(f"validation sequences: {len(validation_set)}")
+    print(f"test sequences: {len(test_set)}")
+    print(f"train label counts: {format_counts(evaluate_label_counts(train_set))}")
+    print(f"validation label counts: {format_counts(evaluate_label_counts(validation_set))}")
+    print(f"sampler={args.sampler} class_weighting={args.class_weighting}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     best_macro_f1 = -1.0
@@ -348,6 +409,9 @@ def main() -> None:
             f"val_accuracy={validation_report['accuracy']:.4f} "
             f"val_macro_f1={validation_report['macro_f1']:.4f}"
         )
+        if args.diagnostics_every and epoch % args.diagnostics_every == 0:
+            print(f"  val truth: {format_counts(validation_report['truth_counts'])}")
+            print(f"  val pred : {format_counts(validation_report['prediction_counts'])}")
         if validation_report["macro_f1"] > best_macro_f1:
             best_macro_f1 = validation_report["macro_f1"]
             best_state = {
@@ -377,6 +441,8 @@ def main() -> None:
             "num_layers": args.num_layers,
             "smoothness_weight": args.smoothness_weight,
             "logic_weight": args.logic_weight,
+            "sampler": args.sampler,
+            "class_weighting": args.class_weighting,
             "best_validation": best_state["validation"],
             "model_description": (
                 "Daily ticker-level GRU latent state updated by aggregated news, "
