@@ -42,6 +42,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smoothness-weight", type=float, default=0.05)
     parser.add_argument("--logic-weight", type=float, default=0.05)
     parser.add_argument(
+        "--persistence-prior-strength",
+        type=float,
+        default=0.0,
+        help=(
+            "Add a logit prior toward the current observed price_trend_id. "
+            "This makes the hidden state persistent by default and lets the GRU learn deviations."
+        ),
+    )
+    parser.add_argument(
         "--sampler",
         choices=["natural", "balanced"],
         default="natural",
@@ -299,7 +308,31 @@ def smoothness_loss(sequence_logits, raw, feature_columns: list[str]):
     return (diffs * calm_weight).mean()
 
 
-def evaluate(model: LatentStateGRU, dataset: DailySequenceDataset, batch_size: int) -> dict:
+def add_persistence_prior(logits, raw, feature_columns: list[str], strength: float):
+    if strength <= 0.0:
+        return logits
+    idx = feature_index(feature_columns, "price_trend_id")
+    if idx is None:
+        return logits
+
+    import torch
+
+    trend = raw[:, :, idx].round().long().clamp(0, len(LABEL_NAMES) - 1)
+    prior = torch.nn.functional.one_hot(trend, num_classes=len(LABEL_NAMES)).to(
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+    if logits.ndim == 2:
+        prior = prior[:, -1, :]
+    return logits + strength * prior
+
+
+def evaluate(
+    model: LatentStateGRU,
+    dataset: DailySequenceDataset,
+    batch_size: int,
+    persistence_prior_strength: float = 0.0,
+) -> dict:
     import torch
     from torch.utils.data import DataLoader
 
@@ -309,9 +342,16 @@ def evaluate(model: LatentStateGRU, dataset: DailySequenceDataset, batch_size: i
     truth = []
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     with torch.no_grad():
-        for x, _, y in loader:
+        for x, raw, y in loader:
             x = x.to(model.device, dtype=torch.float32)
+            raw = raw.to(model.device, dtype=torch.float32)
             logits, _ = model.logits(x)
+            logits = add_persistence_prior(
+                logits,
+                raw,
+                dataset.feature_columns,
+                persistence_prior_strength,
+            )
             preds.append(logits.argmax(dim=1).cpu().numpy())
             truth.append(y.numpy())
     y_true = np.concatenate(truth)
@@ -408,7 +448,10 @@ def main() -> None:
     print(f"train label counts: {format_counts(evaluate_label_counts(train_set))}")
     print(f"validation label counts: {format_counts(evaluate_label_counts(validation_set))}")
     print(f"test label counts: {format_counts(evaluate_label_counts(test_set))}")
-    print(f"sampler={args.sampler} class_weighting={args.class_weighting}")
+    print(
+        f"sampler={args.sampler} class_weighting={args.class_weighting} "
+        f"persistence_prior_strength={args.persistence_prior_strength}"
+    )
 
     train_majority = int(np.bincount(sequence_labels(train_set), minlength=3).argmax())
     print_report_summary("validation_majority_baseline", majority_baseline_report(validation_set, train_majority))
@@ -435,6 +478,18 @@ def main() -> None:
 
             optimizer.zero_grad()
             final_logits, sequence_logits = model.logits(x)
+            final_logits = add_persistence_prior(
+                final_logits,
+                raw,
+                feature_columns,
+                args.persistence_prior_strength,
+            )
+            sequence_logits = add_persistence_prior(
+                sequence_logits,
+                raw,
+                feature_columns,
+                args.persistence_prior_strength,
+            )
             task = criterion(final_logits, y)
             smooth = smoothness_loss(sequence_logits, raw, feature_columns)
             logic = logic_loss(sequence_logits, raw, feature_columns)
@@ -447,7 +502,12 @@ def main() -> None:
             smooth_losses.append(float(smooth.detach().cpu()))
             logic_losses.append(float(logic.detach().cpu()))
 
-        validation_report = evaluate(model, validation_set, args.batch_size)
+        validation_report = evaluate(
+            model,
+            validation_set,
+            args.batch_size,
+            persistence_prior_strength=args.persistence_prior_strength,
+        )
         print(
             f"epoch={epoch} loss={np.mean(losses):.4f} "
             f"task={np.mean(task_losses):.4f} smooth={np.mean(smooth_losses):.4f} "
@@ -476,7 +536,12 @@ def main() -> None:
         args.output_dir / "best_latent_state_gru.pt",
     )
 
-    test_report = evaluate(model, test_set, args.batch_size)
+    test_report = evaluate(
+        model,
+        test_set,
+        args.batch_size,
+        persistence_prior_strength=args.persistence_prior_strength,
+    )
     write_json(
         args.output_dir / "training_metadata.json",
         {
@@ -487,6 +552,7 @@ def main() -> None:
             "num_layers": args.num_layers,
             "smoothness_weight": args.smoothness_weight,
             "logic_weight": args.logic_weight,
+            "persistence_prior_strength": args.persistence_prior_strength,
             "sampler": args.sampler,
             "class_weighting": args.class_weighting,
             "best_validation": best_state["validation"],
