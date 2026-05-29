@@ -56,9 +56,10 @@ daily ticker signal, then lets a temporal model update a hidden market state ove
 time. This better matches the idea that one article should nudge the state,
 rather than single-handedly flip the regime.
 
-To use DeepSeek as the news interpreter, first create article-level DeepSeek
-features. This runs the frozen model once per unique article and saves compact
-numeric features:
+The main DeepSeek interpreter is the daily contextual driver extraction below.
+Article-level DeepSeek embeddings are optional numeric features for ablation,
+not the core explainability mechanism. If you want that optional embedding
+baseline, run:
 
 ```powershell
 python src\data\build_deepseek_news_features.py `
@@ -77,53 +78,48 @@ python src\data\build_deepseek_news_features.py `
   --output-path data\processed\deepseek_article_features_smoke.parquet
 ```
 
-For the explainable dissertation pipeline, extract open-ended contextual market
-drivers. This is not just an optional add-on: it is the part where DeepSeek
-interprets the news and produces human-readable market-state update evidence.
-It lets DeepSeek name period-specific drivers such as "Iran conflict
-escalation", "AI capex optimism", or "regional bank credit stress", while saving
-general numeric update signals such as risk direction, novelty, intensity, and
-confidence:
+For the explainable dissertation pipeline, DeepSeek should read all news for a
+ticker/trading day together and output one daily contextual predicate set. This
+keeps the model aligned with the latent-state idea: one article should not flip
+the regime by itself; the hidden state updates once per ticker/day from the full
+daily news context.
 
 ```powershell
-python src\data\extract_contextual_drivers.py `
+python src\data\extract_daily_contextual_drivers.py `
   --input-path data\processed\ltn_all.parquet `
-  --output-path data\processed\contextual_driver_features.parquet `
-  --batch-size 1 `
-  --min-relevance 0.25 `
-  --top-n-per-ticker-day 3
+  --output-path data\processed\daily_contextual_driver_predicates.parquet `
+  --batch-size 1
 ```
 
 For a tiny smoke test:
 
 ```powershell
-python src\data\extract_contextual_drivers.py `
-  --max-rows 25 `
-  --min-relevance 0.25 `
-  --output-path data\processed\contextual_driver_features_smoke.parquet
+python src\data\extract_daily_contextual_drivers.py `
+  --max-days 25 `
+  --output-path data\processed\daily_contextual_driver_predicates_smoke.parquet
 ```
 
-For a practical case-study extraction, restrict the expensive contextual driver
-step to a split, date window, or top articles:
+For a practical case-study extraction, restrict the expensive daily DeepSeek
+step to a split, ticker, or date window:
 
 ```powershell
-python src\data\extract_contextual_drivers.py `
+python src\data\extract_daily_contextual_drivers.py `
   --input-path data\processed\ltn_all.parquet `
-  --output-path data\processed\contextual_driver_features_case_study.parquet `
+  --output-path data\processed\daily_contextual_driver_predicates_case_study.parquet `
   --split test `
+  --ticker NVDA `
   --start-date 2025-07-01 `
   --end-date 2026-04-30 `
-  --min-relevance 0.35 `
-  --top-n-per-ticker-day 2 `
   --batch-size 1
 ```
 
-Then build the daily latent-state dataset with those DeepSeek features merged in:
+Then build the daily latent-state dataset with the daily DeepSeek predicates
+merged in. The model can be run without article-level embeddings; the key
+interpretable DeepSeek input is the ticker/day predicate file:
 
 ```powershell
 python src\data\build_latent_state_dataset.py `
-  --deepseek-features-path data\processed\deepseek_article_features.parquet `
-  --contextual-drivers-path data\processed\contextual_driver_features.parquet `
+  --daily-contextual-drivers-path data\processed\daily_contextual_driver_predicates.parquet `
   --require-contextual-drivers
 ```
 
@@ -154,7 +150,7 @@ python src\models\train_latent_state_gru.py `
 
 The GRU hidden state is updated daily from:
 
-- aggregated news intensity/relevance/sentiment
+- DeepSeek daily contextual driver predicates
 - macroeconomic features
 - known price/trend context at the anchor date
 
@@ -163,8 +159,9 @@ The additional losses encode the project idea:
 - `smoothness_weight`: discourages abrupt regime probability jumps when the
   daily signal is calm
 - `logic_weight`: softly regularises economically plausible transitions, e.g.
-  tightening plus negative relevant DeepSeek contextual drivers should raise
-  bearish probability
+  persistent risk-off daily drivers should reduce bull confidence, conflicting
+  drivers should raise uncertainty, and irrelevant/low-novelty contexts should
+  preserve the current regime.
 
 For a quick smoke test:
 

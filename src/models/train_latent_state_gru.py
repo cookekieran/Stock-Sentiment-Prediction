@@ -286,8 +286,22 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         materiality = get_raw(raw, feature_columns, "driver_mean_materiality").clamp(0.0, 1.0)
         novelty = get_raw(raw, feature_columns, "driver_mean_novelty").clamp(0.0, 1.0)
         confidence = get_raw(raw, feature_columns, "driver_mean_confidence").clamp(0.0, 1.0)
+        update_strength = get_raw(raw, feature_columns, "driver_update_strength").clamp(0.0, 1.0)
+        uncertainty = get_raw(raw, feature_columns, "driver_uncertainty").clamp(0.0, 1.0)
+        irrelevant_scope = get_raw(raw, feature_columns, "driver_irrelevant_scope_share").clamp(0.0, 1.0)
+        macro_channel = get_raw(raw, feature_columns, "driver_macro_variable_channel_importance").clamp(0.0, 1.0)
         relevant_news = (materiality * confidence).clamp(0.0, 1.0)
         conflicting_news = (positive_news * negative_news).sqrt().clamp(0.0, 1.0)
+        if probs.shape[1] > 1:
+            prob_shift = (probs[:, 1:, :] - probs[:, :-1, :]).abs().sum(dim=-1).clamp(0.0, 1.0)
+            calm_or_irrelevant = ((1.0 - update_strength[:, 1:]) * (1.0 - novelty[:, 1:]) + irrelevant_scope[:, 1:]).clamp(0.0, 1.0)
+            persistent_risk_off = (negative_news[:, 1:] * negative_news[:, :-1] * confidence[:, 1:]).clamp(0.0, 1.0)
+            persistent_risk_on = (positive_news[:, 1:] * positive_news[:, :-1] * confidence[:, 1:]).clamp(0.0, 1.0)
+        else:
+            prob_shift = sequence_logits.new_zeros(sequence_logits.shape[:2])
+            calm_or_irrelevant = sequence_logits.new_zeros(sequence_logits.shape[:2])
+            persistent_risk_off = sequence_logits.new_zeros(sequence_logits.shape[:2])
+            persistent_risk_on = sequence_logits.new_zeros(sequence_logits.shape[:2])
     else:
         sentiment = get_raw(raw, feature_columns, "news_relevance_weighted_sentiment").clamp(-1.0, 1.0)
         shock = sentiment
@@ -295,7 +309,13 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         negative_news = (-sentiment).clamp(min=0.0)
         relevant_news = get_raw(raw, feature_columns, "news_high_relevance_rate").clamp(0.0, 1.0)
         novelty = relevant_news
+        uncertainty = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        macro_channel = sequence_logits.new_ones(sequence_logits.shape[:2])
         conflicting_news = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        prob_shift = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        calm_or_irrelevant = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        persistent_risk_off = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        persistent_risk_on = sequence_logits.new_zeros(sequence_logits.shape[:2])
     high_inflation = get_raw(raw, feature_columns, "macro_high_inflation").clamp(0.0, 1.0)
     rising_rates = get_raw(raw, feature_columns, "macro_rising_rates").clamp(0.0, 1.0)
     tightening = get_raw(raw, feature_columns, "macro_tightening_regime").clamp(0.0, 1.0)
@@ -305,13 +325,21 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
 
     losses = [
         fuzzy_implication_loss(relevant_news * negative_news * (0.5 + 0.5 * novelty), 1.0 - bull),
-        fuzzy_implication_loss(relevant_news * negative_news * tightening, bear + sideways),
-        fuzzy_implication_loss(relevant_news * positive_news * easing, bull),
-        fuzzy_implication_loss(high_inflation * rising_rates, 1.0 - bull),
-        fuzzy_implication_loss(inverted_curve * negative_news, bear + sideways),
-        fuzzy_implication_loss(falling_rates * easing * positive_news, 1.0 - bear),
-        fuzzy_implication_loss(conflicting_news, sideways),
+        fuzzy_implication_loss(relevant_news * negative_news * macro_channel * tightening, bear + sideways),
+        fuzzy_implication_loss(relevant_news * positive_news * macro_channel * easing, bull),
+        fuzzy_implication_loss(macro_channel * high_inflation * rising_rates, 1.0 - bull),
+        fuzzy_implication_loss(macro_channel * inverted_curve * negative_news, bear + sideways),
+        fuzzy_implication_loss(macro_channel * falling_rates * easing * positive_news, 1.0 - bear),
+        fuzzy_implication_loss((conflicting_news + uncertainty).clamp(0.0, 1.0), sideways),
     ]
+    if probs.shape[1] > 1:
+        losses.extend(
+            [
+                fuzzy_implication_loss(calm_or_irrelevant, 1.0 - prob_shift),
+                fuzzy_implication_loss(persistent_risk_off, 1.0 - bull[:, 1:]),
+                fuzzy_implication_loss(persistent_risk_on, 1.0 - bear[:, 1:]),
+            ]
+        )
     return sum(losses) / len(losses)
 
 
@@ -451,7 +479,11 @@ def collect_predictions(
                     "future_price_trend_label": final.get("future_price_trend_label", ""),
                 }
                 for column in dataset.df.columns:
-                    if column.startswith("top_driver_") or column.startswith("driver_"):
+                    if (
+                        column.startswith("top_driver_")
+                        or column.startswith("driver_")
+                        or column in {"daily_market_narrative", "net_pressure", "relevant_channels_json"}
+                    ):
                         value = final.get(column)
                         if pd.api.types.is_scalar(value):
                             row[column] = value

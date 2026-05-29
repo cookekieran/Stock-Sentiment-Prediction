@@ -47,14 +47,18 @@ def rule_activations(row: pd.Series) -> dict[str, float]:
     novelty = clamp(row.get("driver_mean_novelty", 0.0))
     confidence = clamp(row.get("driver_mean_confidence", 0.0))
     abs_shock = clamp(row.get("driver_abs_shock_score", 0.0))
+    update_strength = clamp(row.get("driver_update_strength", materiality))
+    uncertainty = clamp(row.get("driver_uncertainty", 0.0))
+    irrelevant_scope = clamp(row.get("driver_irrelevant_scope_share", 0.0))
     conflict = (risk_off * risk_on) ** 0.5
 
     return {
         "persistent risk-off evidence should reduce bull confidence": risk_off * materiality * confidence,
         "risk-on evidence should reduce bear confidence": risk_on * materiality * confidence,
-        "novel high-materiality news may justify a larger state update": novelty * materiality,
-        "conflicting drivers should raise uncertainty/sideways probability": conflict,
-        "low-impact news should preserve the previous state": 1.0 - abs_shock,
+        "novel high-materiality news may justify a larger state update": novelty * update_strength,
+        "conflicting or uncertain drivers should raise sideways probability": max(conflict, uncertainty),
+        "low update strength or irrelevant scope should preserve persistence": max(1.0 - update_strength, irrelevant_scope),
+        "large absolute driver shock should weaken pure persistence": abs_shock,
     }
 
 
@@ -78,9 +82,11 @@ def driver_lines(row: pd.Series) -> list[str]:
         if not isinstance(label, str) or not label.strip():
             continue
         pressure = row.get(f"top_driver_{idx}_pressure", "")
+        scope = row.get(f"top_driver_{idx}_scope", "")
         summary = row.get(f"top_driver_{idx}_summary", "")
         evidence = row.get(f"top_driver_{idx}_evidence", "")
-        line = f"{idx}. {label} [{pressure}]"
+        bracket = f"{pressure}/{scope}" if isinstance(scope, str) and scope.strip() else str(pressure)
+        line = f"{idx}. {label} [{bracket}]"
         if isinstance(summary, str) and summary.strip():
             line += f": {summary}"
         if isinstance(evidence, str) and evidence.strip():
@@ -123,9 +129,12 @@ def main() -> None:
         raise ValueError(
             "No contextual driver text was saved for this prediction row. "
             "For the explainable dissertation pipeline, rebuild the daily dataset "
-            "with --contextual-drivers-path and train with --save-predictions."
+            "with --daily-contextual-drivers-path and train with --save-predictions."
         )
     print("DeepSeek contextual drivers")
+    narrative = final.get("daily_market_narrative", "")
+    if isinstance(narrative, str) and narrative.strip():
+        print(f"  Daily narrative: {narrative}")
     if drivers:
         for line in drivers:
             print(f"  {line}")

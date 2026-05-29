@@ -55,6 +55,9 @@ DEEPSEEK_AGGREGATE_PREFIXES = [
 
 DRIVER_FEATURE_COLUMNS = [
     "driver_count",
+    "driver_update_strength",
+    "driver_uncertainty",
+    "net_pressure_score",
     "driver_mean_direction_score",
     "driver_relevance_weighted_direction_score",
     "driver_mean_intensity",
@@ -73,6 +76,11 @@ DRIVER_FEATURE_COLUMNS = [
     "driver_sector_scope_share",
     "driver_broad_market_scope_share",
     "driver_macro_scope_share",
+    "driver_irrelevant_scope_share",
+    "driver_channel_count",
+    "driver_mean_channel_importance",
+    "driver_macro_variable_channel_importance",
+    "driver_price_variable_channel_importance",
 ]
 
 
@@ -113,6 +121,16 @@ def parse_args() -> argparse.Namespace:
             "Optional article/ticker contextual drivers created by "
             "extract_contextual_drivers.py. If provided, driver signals are merged "
             "and aggregated into daily latent-state features."
+        ),
+    )
+    parser.add_argument(
+        "--daily-contextual-drivers-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional ticker/day DeepSeek predicates created by "
+            "extract_daily_contextual_drivers.py. These are merged after article "
+            "rows have been aggregated to daily ticker rows."
         ),
     )
     parser.add_argument(
@@ -293,6 +311,24 @@ def build_daily_dataset(df: pd.DataFrame, relevance_threshold: float) -> pd.Data
     return daily
 
 
+def merge_daily_contextual_drivers(daily: pd.DataFrame, path: Path) -> pd.DataFrame:
+    drivers = pd.read_parquet(path)
+    required = {"ticker", "anchor_trading_date"}
+    missing = sorted(required.difference(drivers.columns))
+    if missing:
+        raise ValueError(f"Daily contextual drivers missing required columns: {missing}")
+    drivers = drivers.copy()
+    drivers["anchor_trading_date"] = pd.to_datetime(drivers["anchor_trading_date"]).dt.normalize()
+    daily = daily.copy()
+    daily["anchor_trading_date"] = pd.to_datetime(daily["anchor_trading_date"]).dt.normalize()
+    return daily.merge(
+        drivers,
+        on=["ticker", "anchor_trading_date"],
+        how="left",
+        validate="many_to_one",
+    )
+
+
 def feature_columns(daily: pd.DataFrame) -> list[str]:
     macro_columns = sorted(
         column
@@ -332,6 +368,7 @@ def write_outputs(daily: pd.DataFrame, output_dir: Path, schema_path: Path) -> N
             column
             for column in daily.columns
             if column.startswith("top_driver_")
+            or column in {"daily_market_narrative", "net_pressure", "relevant_channels_json"}
         ],
         "excluded_forward_looking_inputs": [
             "next_day_return",
@@ -359,7 +396,8 @@ def validate_contextual_drivers(daily: pd.DataFrame) -> None:
         raise ValueError(
             "Contextual driver features are required for the explainable pipeline, "
             f"but these daily columns are missing: {missing}. Run "
-            "src/data/extract_contextual_drivers.py and pass --contextual-drivers-path."
+            "src/data/extract_daily_contextual_drivers.py and pass "
+            "--daily-contextual-drivers-path."
         )
     driver_count = pd.to_numeric(daily["driver_count"], errors="coerce").fillna(0.0)
     if float(driver_count.sum()) <= 0.0:
@@ -413,11 +451,15 @@ def main() -> None:
             validate="many_to_one",
         )
         print(f"Merged contextual driver features: {args.contextual_drivers_path}")
-    elif args.require_contextual_drivers:
+    elif args.require_contextual_drivers and not args.daily_contextual_drivers_path:
         raise ValueError(
-            "--require-contextual-drivers was set, but no --contextual-drivers-path was provided."
+            "--require-contextual-drivers was set, but neither --contextual-drivers-path "
+            "nor --daily-contextual-drivers-path was provided."
         )
     daily = build_daily_dataset(df, args.relevance_threshold)
+    if args.daily_contextual_drivers_path:
+        daily = merge_daily_contextual_drivers(daily, args.daily_contextual_drivers_path)
+        print(f"Merged daily contextual driver predicates: {args.daily_contextual_drivers_path}")
     if args.require_contextual_drivers:
         validate_contextual_drivers(daily)
     write_outputs(daily, args.output_dir, args.schema_path)
