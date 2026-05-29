@@ -77,11 +77,33 @@ python src\data\build_deepseek_news_features.py `
   --output-path data\processed\deepseek_article_features_smoke.parquet
 ```
 
+For a more interpretable version, extract open-ended contextual market drivers.
+This lets DeepSeek name period-specific drivers such as "Iran conflict
+escalation", "AI capex optimism", or "regional bank credit stress", while saving
+general numeric update signals such as risk direction, novelty, intensity, and
+confidence:
+
+```powershell
+python src\data\extract_contextual_drivers.py `
+  --input-path data\processed\ltn_all.parquet `
+  --output-path data\processed\contextual_driver_features.parquet `
+  --batch-size 1
+```
+
+For a tiny smoke test:
+
+```powershell
+python src\data\extract_contextual_drivers.py `
+  --max-rows 25 `
+  --output-path data\processed\contextual_driver_features_smoke.parquet
+```
+
 Then build the daily latent-state dataset with those DeepSeek features merged in:
 
 ```powershell
 python src\data\build_latent_state_dataset.py `
-  --deepseek-features-path data\processed\deepseek_article_features.parquet
+  --deepseek-features-path data\processed\deepseek_article_features.parquet `
+  --contextual-drivers-path data\processed\contextual_driver_features.parquet
 ```
 
 Outputs:
@@ -104,7 +126,8 @@ python src\models\train_latent_state_gru.py `
   --sequence-length 20 `
   --epochs 25 `
   --smoothness-weight 0.05 `
-  --logic-weight 0.05
+  --logic-weight 0.05 `
+  --save-predictions
 ```
 
 The GRU hidden state is updated daily from:
@@ -128,6 +151,15 @@ python src\models\train_latent_state_gru.py `
   --epochs 1 `
   --hidden-size 16 `
   --batch-size 16
+```
+
+After training with `--save-predictions`, explain a specific ticker/date:
+
+```powershell
+python src\models\explain_market_state_prediction.py `
+  --predictions-path models\latent_state_gru\test_predictions.parquet `
+  --ticker NVDA `
+  --date 2026-04-15
 ```
 
 ## 4. Train the old DeepSeek-only baseline

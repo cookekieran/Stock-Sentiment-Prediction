@@ -53,6 +53,28 @@ DEEPSEEK_AGGREGATE_PREFIXES = [
     "deepseek_relevance_weighted_",
 ]
 
+DRIVER_FEATURE_COLUMNS = [
+    "driver_count",
+    "driver_mean_direction_score",
+    "driver_relevance_weighted_direction_score",
+    "driver_mean_intensity",
+    "driver_max_intensity",
+    "driver_mean_novelty",
+    "driver_max_novelty",
+    "driver_mean_confidence",
+    "driver_mean_materiality",
+    "driver_max_materiality",
+    "driver_mean_shock_score",
+    "driver_abs_shock_score",
+    "driver_max_risk_on_shock",
+    "driver_max_risk_off_shock",
+    "driver_mean_horizon_days",
+    "driver_ticker_scope_share",
+    "driver_sector_scope_share",
+    "driver_broad_market_scope_share",
+    "driver_macro_scope_share",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -81,6 +103,16 @@ def parse_args() -> argparse.Namespace:
             "Optional article-level DeepSeek features created by "
             "build_deepseek_news_features.py. If provided, these are merged by article_uid "
             "and aggregated into daily news features."
+        ),
+    )
+    parser.add_argument(
+        "--contextual-drivers-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional article/ticker contextual drivers created by "
+            "extract_contextual_drivers.py. If provided, driver signals are merged "
+            "and aggregated into daily latent-state features."
         ),
     )
     parser.add_argument(
@@ -157,6 +189,51 @@ def aggregate_day(group: pd.DataFrame, relevance_threshold: float) -> pd.Series:
             relevance,
         )
 
+    if "driver_shock_score" in group.columns:
+        direction = numeric(group["direction_score"])
+        intensity = numeric(group["driver_intensity"])
+        novelty = numeric(group["driver_novelty"])
+        confidence = numeric(group["driver_confidence"])
+        materiality = numeric(group["driver_materiality"])
+        shock = numeric(group["driver_shock_score"])
+        horizon = numeric(group["horizon_days"])
+        out.update(
+            {
+                "driver_count": float(group["driver_shock_score"].notna().sum()),
+                "driver_mean_direction_score": float(direction.mean()),
+                "driver_relevance_weighted_direction_score": weighted_mean(direction, relevance),
+                "driver_mean_intensity": float(intensity.mean()),
+                "driver_max_intensity": float(intensity.max()),
+                "driver_mean_novelty": float(novelty.mean()),
+                "driver_max_novelty": float(novelty.max()),
+                "driver_mean_confidence": float(confidence.mean()),
+                "driver_mean_materiality": float(materiality.mean()),
+                "driver_max_materiality": float(materiality.max()),
+                "driver_mean_shock_score": float(shock.mean()),
+                "driver_abs_shock_score": float(shock.abs().mean()),
+                "driver_max_risk_on_shock": float(shock.clip(lower=0.0).max()),
+                "driver_max_risk_off_shock": float((-shock).clip(lower=0.0).max()),
+                "driver_mean_horizon_days": float(horizon.mean()),
+            }
+        )
+        scope = group.get("market_scope", pd.Series("unknown", index=group.index)).fillna("unknown").astype(str)
+        total = max(len(scope), 1)
+        out.update(
+            {
+                "driver_ticker_scope_share": float((scope == "ticker").sum() / total),
+                "driver_sector_scope_share": float((scope == "sector").sum() / total),
+                "driver_broad_market_scope_share": float((scope == "broad_market").sum() / total),
+                "driver_macro_scope_share": float((scope == "macro").sum() / total),
+            }
+        )
+        ranked = group.assign(_driver_rank=materiality * relevance.fillna(0.0))
+        ranked = ranked.sort_values("_driver_rank", ascending=False).head(3)
+        for idx, (_, row) in enumerate(ranked.iterrows(), start=1):
+            out[f"top_driver_{idx}_label"] = row.get("driver_label", "")
+            out[f"top_driver_{idx}_summary"] = row.get("driver_summary", "")
+            out[f"top_driver_{idx}_pressure"] = row.get("directional_pressure", "")
+            out[f"top_driver_{idx}_evidence"] = row.get("evidence", "")
+
     first = group.sort_values(["time_published", "article_uid"]).iloc[0]
     stable_columns = [
         "month",
@@ -220,6 +297,7 @@ def feature_columns(daily: pd.DataFrame) -> list[str]:
     candidates = [
         "news_log_article_count",
         *NEWS_FEATURE_COLUMNS,
+        *DRIVER_FEATURE_COLUMNS,
         *[
             column
             for column in sorted(daily.columns)
@@ -244,6 +322,11 @@ def write_outputs(daily: pd.DataFrame, output_dir: Path, schema_path: Path) -> N
         "date_column": "anchor_trading_date",
         "entity_column": "ticker",
         "feature_columns": feature_columns(daily),
+        "explanation_columns": [
+            column
+            for column in daily.columns
+            if column.startswith("top_driver_")
+        ],
         "excluded_forward_looking_inputs": [
             "next_day_return",
             "three_day_return",
@@ -284,6 +367,22 @@ def main() -> None:
             raise ValueError(f"DeepSeek features must contain article_uid: {args.deepseek_features_path}")
         df = df.merge(deepseek, on="article_uid", how="left", validate="many_to_one")
         print(f"Merged DeepSeek article features: {args.deepseek_features_path}")
+    if args.contextual_drivers_path:
+        drivers = pd.read_parquet(args.contextual_drivers_path)
+        required = {"article_uid", "ticker", "anchor_trading_date"}
+        missing = sorted(required.difference(drivers.columns))
+        if missing:
+            raise ValueError(f"Contextual drivers missing required columns: {missing}")
+        drivers = drivers.copy()
+        drivers["anchor_trading_date"] = pd.to_datetime(drivers["anchor_trading_date"]).dt.normalize()
+        df["anchor_trading_date"] = pd.to_datetime(df["anchor_trading_date"]).dt.normalize()
+        df = df.merge(
+            drivers,
+            on=["article_uid", "ticker", "anchor_trading_date"],
+            how="left",
+            validate="many_to_one",
+        )
+        print(f"Merged contextual driver features: {args.contextual_drivers_path}")
     daily = build_daily_dataset(df, args.relevance_threshold)
     write_outputs(daily, args.output_dir, args.schema_path)
     print_summary(daily)
