@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save validation/test prediction probabilities for later explanations.",
     )
+    parser.add_argument(
+        "--require-contextual-drivers",
+        action="store_true",
+        help="Fail unless contextual driver features are present and non-empty.",
+    )
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -498,11 +503,40 @@ def print_report_summary(name: str, report: dict) -> None:
         print(f"  {name} pred : {format_counts(report['prediction_counts'])}")
 
 
+def validate_contextual_driver_inputs(daily: pd.DataFrame, feature_columns: list[str]) -> None:
+    required_features = {
+        "driver_mean_shock_score",
+        "driver_mean_materiality",
+        "driver_mean_confidence",
+        "driver_max_risk_on_shock",
+        "driver_max_risk_off_shock",
+    }
+    missing_features = sorted(required_features.difference(feature_columns))
+    missing_text = "top_driver_1_label" not in daily.columns
+    if missing_features or missing_text:
+        details = []
+        if missing_features:
+            details.append(f"missing driver feature columns: {missing_features}")
+        if missing_text:
+            details.append("missing top_driver_1_label explanation text")
+        raise ValueError(
+            "Contextual driver inputs are required for this explainable run, but "
+            + "; ".join(details)
+            + ". Rebuild the daily dataset with --contextual-drivers-path and "
+            "--require-contextual-drivers."
+        )
+    driver_count = pd.to_numeric(daily.get("driver_count"), errors="coerce").fillna(0.0)
+    if float(driver_count.sum()) <= 0.0:
+        raise ValueError("Contextual driver columns exist, but driver_count is zero for every row.")
+
+
 def main() -> None:
     args = parse_args()
     schema = read_schema(args.schema_path)
     daily = load_daily(args.daily_path)
     feature_columns = [column for column in schema["feature_columns"] if column in daily.columns]
+    if args.require_contextual_drivers:
+        validate_contextual_driver_inputs(daily, feature_columns)
 
     train_df = daily[daily["split"] == "train"].copy()
     validation_df = daily[daily["split"] == "validation"].copy()

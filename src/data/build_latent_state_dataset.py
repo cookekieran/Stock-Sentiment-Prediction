@@ -116,6 +116,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-contextual-drivers",
+        action="store_true",
+        help="Fail if contextual driver signals are missing from the daily dataset.",
+    )
+    parser.add_argument(
         "--relevance-threshold",
         type=float,
         default=0.25,
@@ -322,6 +327,7 @@ def write_outputs(daily: pd.DataFrame, output_dir: Path, schema_path: Path) -> N
         "date_column": "anchor_trading_date",
         "entity_column": "ticker",
         "feature_columns": feature_columns(daily),
+        "has_contextual_driver_features": "driver_mean_shock_score" in daily.columns,
         "explanation_columns": [
             column
             for column in daily.columns
@@ -338,6 +344,30 @@ def write_outputs(daily: pd.DataFrame, output_dir: Path, schema_path: Path) -> N
     }
     schema_path.parent.mkdir(parents=True, exist_ok=True)
     schema_path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
+
+
+def validate_contextual_drivers(daily: pd.DataFrame) -> None:
+    required = {
+        "driver_count",
+        "driver_mean_shock_score",
+        "driver_mean_materiality",
+        "driver_mean_confidence",
+        "top_driver_1_label",
+    }
+    missing = sorted(required.difference(daily.columns))
+    if missing:
+        raise ValueError(
+            "Contextual driver features are required for the explainable pipeline, "
+            f"but these daily columns are missing: {missing}. Run "
+            "src/data/extract_contextual_drivers.py and pass --contextual-drivers-path."
+        )
+    driver_count = pd.to_numeric(daily["driver_count"], errors="coerce").fillna(0.0)
+    if float(driver_count.sum()) <= 0.0:
+        raise ValueError(
+            "Contextual driver features are required, but no extracted drivers were "
+            "merged into the daily dataset. Check the driver extraction filters and "
+            "article_uid/ticker/date keys."
+        )
 
 
 def print_summary(daily: pd.DataFrame) -> None:
@@ -383,7 +413,13 @@ def main() -> None:
             validate="many_to_one",
         )
         print(f"Merged contextual driver features: {args.contextual_drivers_path}")
+    elif args.require_contextual_drivers:
+        raise ValueError(
+            "--require-contextual-drivers was set, but no --contextual-drivers-path was provided."
+        )
     daily = build_daily_dataset(df, args.relevance_threshold)
+    if args.require_contextual_drivers:
+        validate_contextual_drivers(daily)
     write_outputs(daily, args.output_dir, args.schema_path)
     print_summary(daily)
 

@@ -50,6 +50,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-input-length", type=int, default=768)
     parser.add_argument("--max-new-tokens", type=int, default=220)
     parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument(
+        "--min-relevance",
+        type=float,
+        default=None,
+        help="Only extract drivers for rows with relevance_score at least this value.",
+    )
+    parser.add_argument(
+        "--top-n-per-ticker-day",
+        type=int,
+        default=None,
+        help="Keep only the top N most relevant articles for each ticker/trading day.",
+    )
+    parser.add_argument(
+        "--split",
+        action="append",
+        choices=["train", "validation", "test"],
+        help="Restrict extraction to one or more dataset splits. Repeat the flag for multiple splits.",
+    )
+    parser.add_argument("--start-date", type=str, default=None)
+    parser.add_argument("--end-date", type=str, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
@@ -117,7 +137,7 @@ Return ONLY valid JSON with this exact shape:
 }}"""
 
 
-def load_rows(path: Path, max_rows: int | None) -> pd.DataFrame:
+def load_rows(args: argparse.Namespace) -> pd.DataFrame:
     columns = [
         "article_uid",
         "ticker",
@@ -126,8 +146,9 @@ def load_rows(path: Path, max_rows: int | None) -> pd.DataFrame:
         "summary",
         "article_text",
         "relevance_score",
+        "split",
     ]
-    full = pd.read_parquet(path)
+    full = pd.read_parquet(args.input_path)
     df = full[[column for column in columns if column in full.columns]].copy()
     required = {"article_uid", "ticker", "anchor_trading_date", "article_text"}
     missing = sorted(required.difference(df.columns))
@@ -140,10 +161,30 @@ def load_rows(path: Path, max_rows: int | None) -> pd.DataFrame:
     if "relevance_score" not in df.columns:
         df["relevance_score"] = 0.0
     df["anchor_trading_date"] = pd.to_datetime(df["anchor_trading_date"]).dt.normalize()
+    if args.split:
+        if "split" not in df.columns:
+            raise ValueError("--split was provided, but the input has no split column.")
+        df = df[df["split"].isin(args.split)].copy()
+    if args.start_date:
+        df = df[df["anchor_trading_date"] >= pd.Timestamp(args.start_date)].copy()
+    if args.end_date:
+        df = df[df["anchor_trading_date"] <= pd.Timestamp(args.end_date)].copy()
+    if args.min_relevance is not None:
+        df = df[pd.to_numeric(df["relevance_score"], errors="coerce").fillna(0.0) >= args.min_relevance].copy()
     df = df.drop_duplicates(subset=["article_uid", "ticker", "anchor_trading_date"])
+    if args.top_n_per_ticker_day:
+        if args.top_n_per_ticker_day < 1:
+            raise ValueError("--top-n-per-ticker-day must be at least 1.")
+        df = (
+            df.assign(_rank_relevance=pd.to_numeric(df["relevance_score"], errors="coerce").fillna(0.0))
+            .sort_values(["anchor_trading_date", "ticker", "_rank_relevance"], ascending=[True, True, False])
+            .groupby(["ticker", "anchor_trading_date"], group_keys=False)
+            .head(args.top_n_per_ticker_day)
+            .drop(columns=["_rank_relevance"])
+        )
     df = df.sort_values(["anchor_trading_date", "ticker", "article_uid"]).reset_index(drop=True)
-    if max_rows:
-        df = df.head(max_rows).copy()
+    if args.max_rows:
+        df = df.head(args.max_rows).copy()
     return df
 
 
@@ -209,7 +250,9 @@ def main() -> None:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    rows = load_rows(args.input_path, args.max_rows)
+    rows = load_rows(args)
+    if rows.empty:
+        raise ValueError("No rows selected for contextual driver extraction. Loosen the filters and try again.")
     existing = load_existing(args.output_path, args.force)
     frames: list[pd.DataFrame] = []
     if existing is not None and not existing.empty:

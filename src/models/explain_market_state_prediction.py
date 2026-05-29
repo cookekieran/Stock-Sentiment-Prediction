@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticker", required=True)
     parser.add_argument("--date", required=True, help="Anchor trading date, e.g. 2026-04-15")
     parser.add_argument("--lookback-days", type=int, default=8)
+    parser.add_argument(
+        "--allow-missing-drivers",
+        action="store_true",
+        help="Print the explanation even if no contextual driver text was saved.",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +119,12 @@ def main() -> None:
     print()
 
     drivers = driver_lines(final)
+    if not drivers and not args.allow_missing_drivers:
+        raise ValueError(
+            "No contextual driver text was saved for this prediction row. "
+            "For the explainable dissertation pipeline, rebuild the daily dataset "
+            "with --contextual-drivers-path and train with --save-predictions."
+        )
     print("DeepSeek contextual drivers")
     if drivers:
         for line in drivers:

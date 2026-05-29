@@ -77,8 +77,10 @@ python src\data\build_deepseek_news_features.py `
   --output-path data\processed\deepseek_article_features_smoke.parquet
 ```
 
-For a more interpretable version, extract open-ended contextual market drivers.
-This lets DeepSeek name period-specific drivers such as "Iran conflict
+For the explainable dissertation pipeline, extract open-ended contextual market
+drivers. This is not just an optional add-on: it is the part where DeepSeek
+interprets the news and produces human-readable market-state update evidence.
+It lets DeepSeek name period-specific drivers such as "Iran conflict
 escalation", "AI capex optimism", or "regional bank credit stress", while saving
 general numeric update signals such as risk direction, novelty, intensity, and
 confidence:
@@ -87,7 +89,9 @@ confidence:
 python src\data\extract_contextual_drivers.py `
   --input-path data\processed\ltn_all.parquet `
   --output-path data\processed\contextual_driver_features.parquet `
-  --batch-size 1
+  --batch-size 1 `
+  --min-relevance 0.25 `
+  --top-n-per-ticker-day 3
 ```
 
 For a tiny smoke test:
@@ -95,7 +99,23 @@ For a tiny smoke test:
 ```powershell
 python src\data\extract_contextual_drivers.py `
   --max-rows 25 `
+  --min-relevance 0.25 `
   --output-path data\processed\contextual_driver_features_smoke.parquet
+```
+
+For a practical case-study extraction, restrict the expensive contextual driver
+step to a split, date window, or top articles:
+
+```powershell
+python src\data\extract_contextual_drivers.py `
+  --input-path data\processed\ltn_all.parquet `
+  --output-path data\processed\contextual_driver_features_case_study.parquet `
+  --split test `
+  --start-date 2025-07-01 `
+  --end-date 2026-04-30 `
+  --min-relevance 0.35 `
+  --top-n-per-ticker-day 2 `
+  --batch-size 1
 ```
 
 Then build the daily latent-state dataset with those DeepSeek features merged in:
@@ -103,7 +123,8 @@ Then build the daily latent-state dataset with those DeepSeek features merged in
 ```powershell
 python src\data\build_latent_state_dataset.py `
   --deepseek-features-path data\processed\deepseek_article_features.parquet `
-  --contextual-drivers-path data\processed\contextual_driver_features.parquet
+  --contextual-drivers-path data\processed\contextual_driver_features.parquet `
+  --require-contextual-drivers
 ```
 
 Outputs:
@@ -127,6 +148,7 @@ python src\models\train_latent_state_gru.py `
   --epochs 25 `
   --smoothness-weight 0.05 `
   --logic-weight 0.05 `
+  --require-contextual-drivers `
   --save-predictions
 ```
 
@@ -141,7 +163,8 @@ The additional losses encode the project idea:
 - `smoothness_weight`: discourages abrupt regime probability jumps when the
   daily signal is calm
 - `logic_weight`: softly regularises economically plausible transitions, e.g.
-  tightening plus negative relevant news should raise bearish probability
+  tightening plus negative relevant DeepSeek contextual drivers should raise
+  bearish probability
 
 For a quick smoke test:
 
