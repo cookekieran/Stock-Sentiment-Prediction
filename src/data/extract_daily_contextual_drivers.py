@@ -80,6 +80,12 @@ def normalise_choice(value, allowed: set[str], default: str) -> str:
     return text if text in allowed else default
 
 
+def normalise_scopes(value) -> list[str]:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    scopes = [scope for scope in text.split("|") if scope in SCOPES]
+    return list(dict.fromkeys(scopes)) or ["irrelevant"]
+
+
 def extract_json(text: str) -> dict:
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not match:
@@ -281,7 +287,7 @@ def normalise_daily_predicates(raw: dict, packet: pd.Series) -> dict:
 
     normalised_drivers = []
     for driver in drivers:
-        scope = normalise_choice(driver.get("scope"), set(SCOPES), "irrelevant")
+        scopes = normalise_scopes(driver.get("scope"))
         pressure = normalise_choice(driver.get("directional_pressure"), set(DIRECTION_TO_SCORE), "neutral")
         intensity = clamp01(driver.get("intensity"))
         novelty = clamp01(driver.get("novelty"))
@@ -292,7 +298,8 @@ def normalise_daily_predicates(raw: dict, packet: pd.Series) -> dict:
             {
                 "driver_label": str(driver.get("driver_label", "no clear driver"))[:200],
                 "driver_summary": str(driver.get("driver_summary", ""))[:600],
-                "scope": scope,
+                "scope": "|".join(scopes),
+                "scopes": scopes,
                 "directional_pressure": pressure,
                 "direction_score": float(DIRECTION_TO_SCORE[pressure]),
                 "intensity": float(intensity),
@@ -314,7 +321,7 @@ def normalise_daily_predicates(raw: dict, packet: pd.Series) -> dict:
     materiality = np.array([driver["materiality"] for driver in normalised_drivers], dtype=float)
     shock = np.array([driver["shock"] for driver in normalised_drivers], dtype=float)
     horizon = np.array([HORIZON_TO_DAYS[driver["time_horizon"]] for driver in normalised_drivers], dtype=float)
-    scopes = [driver["scope"] for driver in normalised_drivers]
+    scopes = [scope for driver in normalised_drivers for scope in driver["scopes"]]
 
     out = {
         "ticker": str(packet["ticker"]),
