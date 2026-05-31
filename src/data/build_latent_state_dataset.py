@@ -81,6 +81,12 @@ DRIVER_FEATURE_COLUMNS = [
     "driver_mean_channel_importance",
     "driver_macro_variable_channel_importance",
     "driver_price_variable_channel_importance",
+    "driver_macro_cpi_yoy_channel_importance",
+    "driver_macro_fed_funds_rate_channel_importance",
+    "driver_macro_treasury_10y_2y_spread_channel_importance",
+    "driver_macro_vix_channel_importance",
+    "driver_macro_wti_oil_channel_importance",
+    "driver_macro_unemployment_rate_channel_importance",
 ]
 
 

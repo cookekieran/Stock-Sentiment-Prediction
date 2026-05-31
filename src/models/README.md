@@ -113,13 +113,26 @@ python src\data\extract_daily_contextual_drivers.py `
   --batch-size 1
 ```
 
+Map the open-ended daily drivers onto the controlled macro variables used by
+the LTN-style rules. This is deterministic and does not call the language model:
+
+```powershell
+python src\data\enrich_daily_contextual_driver_macro_channels.py `
+  --input-path data\processed\daily_contextual_driver_predicates.parquet `
+  --output-path data\processed\daily_contextual_driver_predicates_macro_mapped.parquet
+```
+
+The command prints activation counts and sample matched drivers for inflation,
+interest rates, the yield curve, volatility, oil prices, and unemployment. The
+output includes the matched patterns so the mapping remains auditable.
+
 Then build the daily latent-state dataset with the daily DeepSeek predicates
 merged in. The model can be run without article-level embeddings; the key
 interpretable DeepSeek input is the ticker/day predicate file:
 
 ```powershell
 python src\data\build_latent_state_dataset.py `
-  --daily-contextual-drivers-path data\processed\daily_contextual_driver_predicates.parquet `
+  --daily-contextual-drivers-path data\processed\daily_contextual_driver_predicates_macro_mapped.parquet `
   --require-contextual-drivers
 ```
 

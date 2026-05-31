@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from contextual_macro_channels import map_macro_channels
+
 
 DIRECTION_TO_SCORE = {
     "risk_off": -1.0,
@@ -237,7 +239,6 @@ def save_output(path: Path, frames: list[pd.DataFrame]) -> None:
 
 def summarise_channels(drivers: list[dict]) -> tuple[list[dict], dict[str, float]]:
     channels = []
-    macro_variable_importance = 0.0
     price_variable_importance = 0.0
     for driver in drivers:
         for raw_channel in driver.get("relevant_channels", []) or []:
@@ -252,8 +253,6 @@ def summarise_channels(drivers: list[dict]) -> tuple[list[dict], dict[str, float
                     "available_variable": variable[:120],
                 }
             )
-            if variable.startswith("macro_"):
-                macro_variable_importance = max(macro_variable_importance, importance)
             if variable in {
                 "anchor_close",
                 "volume",
@@ -267,11 +266,13 @@ def summarise_channels(drivers: list[dict]) -> tuple[list[dict], dict[str, float
         mean_importance = float(np.mean([channel["importance"] for channel in channels]))
     else:
         mean_importance = 0.0
+    macro_features, macro_matches = map_macro_channels(drivers)
     return channels, {
         "driver_channel_count": float(len(channels)),
         "driver_mean_channel_importance": mean_importance,
-        "driver_macro_variable_channel_importance": float(macro_variable_importance),
         "driver_price_variable_channel_importance": float(price_variable_importance),
+        "driver_macro_channel_matches_json": json.dumps(macro_matches),
+        **macro_features,
     }
 
 

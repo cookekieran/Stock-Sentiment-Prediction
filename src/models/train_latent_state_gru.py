@@ -290,6 +290,12 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         uncertainty = get_raw(raw, feature_columns, "driver_uncertainty").clamp(0.0, 1.0)
         irrelevant_scope = get_raw(raw, feature_columns, "driver_irrelevant_scope_share").clamp(0.0, 1.0)
         macro_channel = get_raw(raw, feature_columns, "driver_macro_variable_channel_importance").clamp(0.0, 1.0)
+        inflation_channel = get_raw(raw, feature_columns, "driver_macro_cpi_yoy_channel_importance").clamp(0.0, 1.0)
+        rates_channel = get_raw(raw, feature_columns, "driver_macro_fed_funds_rate_channel_importance").clamp(0.0, 1.0)
+        yield_curve_channel = get_raw(raw, feature_columns, "driver_macro_treasury_10y_2y_spread_channel_importance").clamp(0.0, 1.0)
+        volatility_channel = get_raw(raw, feature_columns, "driver_macro_vix_channel_importance").clamp(0.0, 1.0)
+        oil_channel = get_raw(raw, feature_columns, "driver_macro_wti_oil_channel_importance").clamp(0.0, 1.0)
+        labor_channel = get_raw(raw, feature_columns, "driver_macro_unemployment_rate_channel_importance").clamp(0.0, 1.0)
         relevant_news = (materiality * confidence).clamp(0.0, 1.0)
         conflicting_news = (positive_news * negative_news).sqrt().clamp(0.0, 1.0)
         if probs.shape[1] > 1:
@@ -311,6 +317,12 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         novelty = relevant_news
         uncertainty = sequence_logits.new_zeros(sequence_logits.shape[:2])
         macro_channel = sequence_logits.new_ones(sequence_logits.shape[:2])
+        inflation_channel = macro_channel
+        rates_channel = macro_channel
+        yield_curve_channel = macro_channel
+        volatility_channel = macro_channel
+        oil_channel = macro_channel
+        labor_channel = macro_channel
         conflicting_news = sequence_logits.new_zeros(sequence_logits.shape[:2])
         prob_shift = sequence_logits.new_zeros(sequence_logits.shape[:2])
         calm_or_irrelevant = sequence_logits.new_zeros(sequence_logits.shape[:2])
@@ -322,14 +334,23 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
     easing = get_raw(raw, feature_columns, "macro_easing_regime").clamp(0.0, 1.0)
     falling_rates = get_raw(raw, feature_columns, "macro_falling_rates").clamp(0.0, 1.0)
     inverted_curve = get_raw(raw, feature_columns, "macro_inverted_yield_curve").clamp(0.0, 1.0)
+    vix = get_raw(raw, feature_columns, "macro_vix")
+    elevated_vix = ((vix - 20.0) / 20.0).clamp(0.0, 1.0)
+    wti_oil = get_raw(raw, feature_columns, "macro_wti_oil")
+    elevated_oil = ((wti_oil - 80.0) / 40.0).clamp(0.0, 1.0)
+    unemployment = get_raw(raw, feature_columns, "macro_unemployment_rate")
+    elevated_unemployment = ((unemployment - 4.0) / 2.0).clamp(0.0, 1.0)
 
     losses = [
         fuzzy_implication_loss(relevant_news * negative_news * (0.5 + 0.5 * novelty), 1.0 - bull),
-        fuzzy_implication_loss(relevant_news * negative_news * macro_channel * tightening, bear + sideways),
-        fuzzy_implication_loss(relevant_news * positive_news * macro_channel * easing, bull),
-        fuzzy_implication_loss(macro_channel * high_inflation * rising_rates, 1.0 - bull),
-        fuzzy_implication_loss(macro_channel * inverted_curve * negative_news, bear + sideways),
-        fuzzy_implication_loss(macro_channel * falling_rates * easing * positive_news, 1.0 - bear),
+        fuzzy_implication_loss(relevant_news * negative_news * rates_channel * tightening, bear + sideways),
+        fuzzy_implication_loss(relevant_news * positive_news * rates_channel * easing, bull),
+        fuzzy_implication_loss(inflation_channel * rates_channel * high_inflation * rising_rates, 1.0 - bull),
+        fuzzy_implication_loss(yield_curve_channel * inverted_curve * negative_news, bear + sideways),
+        fuzzy_implication_loss(rates_channel * falling_rates * easing * positive_news, 1.0 - bear),
+        fuzzy_implication_loss(volatility_channel * elevated_vix * negative_news, bear + sideways),
+        fuzzy_implication_loss(oil_channel * elevated_oil * negative_news, bear + sideways),
+        fuzzy_implication_loss(labor_channel * elevated_unemployment * negative_news, bear + sideways),
         fuzzy_implication_loss((conflicting_news + uncertainty).clamp(0.0, 1.0), sideways),
     ]
     if probs.shape[1] > 1:
