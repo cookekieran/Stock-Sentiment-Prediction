@@ -80,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         help="Fail unless contextual driver features are present and non-empty.",
     )
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--feature-set",
+        choices=["full", "price_only", "price_macro", "price_qwen"],
+        default="full",
+        help="Select a controlled feature ablation without rebuilding the daily parquet.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--early-stopping-patience",
@@ -107,6 +113,34 @@ def load_daily(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df["anchor_trading_date"] = pd.to_datetime(df["anchor_trading_date"])
     return df.sort_values(["ticker", "anchor_trading_date"]).reset_index(drop=True)
+
+
+def select_feature_columns(feature_columns: list[str], feature_set: str) -> list[str]:
+    price_columns = {
+        "realized_volatility_20d",
+        "rally_from_previous_low",
+        "drawdown_from_previous_high",
+        "recent_return",
+        "drawdown_from_recent_high",
+        "price_trend_id",
+    }
+    if feature_set == "full":
+        return feature_columns
+    if feature_set == "price_only":
+        return [column for column in feature_columns if column in price_columns]
+    if feature_set == "price_macro":
+        return [
+            column
+            for column in feature_columns
+            if column in price_columns or column.startswith("macro_")
+        ]
+    if feature_set == "price_qwen":
+        return [
+            column
+            for column in feature_columns
+            if column in price_columns or not column.startswith("macro_")
+        ]
+    raise ValueError(f"Unknown feature set: {feature_set}")
 
 
 def fit_feature_stats(df: pd.DataFrame, feature_columns: list[str]) -> dict[str, dict[str, float]]:
@@ -144,14 +178,16 @@ class DailySequenceDataset:
     def __init__(
         self,
         df: pd.DataFrame,
-        feature_columns: list[str],
+        input_feature_columns: list[str],
+        raw_feature_columns: list[str],
         stats: dict[str, dict[str, float]],
         sequence_length: int,
     ):
         self.df = df.sort_values(["ticker", "anchor_trading_date"]).reset_index(drop=True)
-        self.feature_columns = feature_columns
-        self.x = transform_features(self.df, feature_columns, stats)
-        self.raw = raw_features(self.df, feature_columns)
+        self.input_feature_columns = input_feature_columns
+        self.feature_columns = raw_feature_columns
+        self.x = transform_features(self.df, input_feature_columns, stats)
+        self.raw = raw_features(self.df, raw_feature_columns)
         self.y = pd.to_numeric(self.df["future_price_trend_id"], errors="raise").to_numpy(np.int64)
         self.indices: list[tuple[int, int]] = []
 
@@ -334,8 +370,8 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         conflicting_news = sequence_logits.new_zeros(sequence_logits.shape[:2])
         prob_shift = sequence_logits.new_zeros(sequence_logits.shape[:2])
         calm_or_irrelevant = sequence_logits.new_zeros(sequence_logits.shape[:2])
-        persistent_risk_off = sequence_logits.new_zeros(sequence_logits.shape[:2])
-        persistent_risk_on = sequence_logits.new_zeros(sequence_logits.shape[:2])
+        persistent_risk_off = sequence_logits.new_zeros((sequence_logits.shape[0], max(sequence_logits.shape[1] - 1, 0)))
+        persistent_risk_on = sequence_logits.new_zeros((sequence_logits.shape[0], max(sequence_logits.shape[1] - 1, 0)))
     high_inflation = get_raw(raw, feature_columns, "macro_high_inflation").clamp(0.0, 1.0)
     rising_rates = get_raw(raw, feature_columns, "macro_rising_rates").clamp(0.0, 1.0)
     tightening = get_raw(raw, feature_columns, "macro_tightening_regime").clamp(0.0, 1.0)
@@ -619,9 +655,10 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
     schema = read_schema(args.schema_path)
     daily = load_daily(args.daily_path)
-    feature_columns = [column for column in schema["feature_columns"] if column in daily.columns]
+    available_feature_columns = [column for column in schema["feature_columns"] if column in daily.columns]
     if args.require_contextual_drivers:
-        validate_contextual_driver_inputs(daily, feature_columns)
+        validate_contextual_driver_inputs(daily, available_feature_columns)
+    input_feature_columns = select_feature_columns(available_feature_columns, args.feature_set)
 
     train_df = daily[daily["split"] == "train"].copy()
     validation_df = daily[daily["split"] == "validation"].copy()
@@ -632,13 +669,19 @@ def main() -> None:
             f"{len(train_df)}, {len(validation_df)}, {len(test_df)}."
         )
 
-    stats = fit_feature_stats(train_df, feature_columns)
-    train_set = DailySequenceDataset(train_df, feature_columns, stats, args.sequence_length)
-    validation_set = DailySequenceDataset(validation_df, feature_columns, stats, args.sequence_length)
-    test_set = DailySequenceDataset(test_df, feature_columns, stats, args.sequence_length)
+    stats = fit_feature_stats(train_df, input_feature_columns)
+    train_set = DailySequenceDataset(
+        train_df, input_feature_columns, available_feature_columns, stats, args.sequence_length
+    )
+    validation_set = DailySequenceDataset(
+        validation_df, input_feature_columns, available_feature_columns, stats, args.sequence_length
+    )
+    test_set = DailySequenceDataset(
+        test_df, input_feature_columns, available_feature_columns, stats, args.sequence_length
+    )
 
     model = LatentStateGRU(
-        input_dim=len(feature_columns),
+        input_dim=len(input_feature_columns),
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
@@ -658,7 +701,8 @@ def main() -> None:
     print(f"test label counts: {format_counts(evaluate_label_counts(test_set))}")
     print(
         f"sampler={args.sampler} class_weighting={args.class_weighting} "
-        f"persistence_prior_strength={args.persistence_prior_strength}"
+        f"persistence_prior_strength={args.persistence_prior_strength} "
+        f"feature_set={args.feature_set} feature_count={len(input_feature_columns)}"
     )
 
     train_majority = int(np.bincount(sequence_labels(train_set), minlength=3).argmax())
@@ -690,18 +734,22 @@ def main() -> None:
             final_logits = add_persistence_prior(
                 final_logits,
                 raw,
-                feature_columns,
+                available_feature_columns,
                 args.persistence_prior_strength,
             )
             sequence_logits = add_persistence_prior(
                 sequence_logits,
                 raw,
-                feature_columns,
+                available_feature_columns,
                 args.persistence_prior_strength,
             )
             task = criterion(final_logits, y)
-            smooth = smoothness_loss(sequence_logits, raw, feature_columns)
-            logic = logic_loss(sequence_logits, raw, feature_columns)
+            smooth = smoothness_loss(sequence_logits, raw, available_feature_columns)
+            logic = (
+                logic_loss(sequence_logits, raw, available_feature_columns)
+                if args.logic_weight > 0.0
+                else sequence_logits.new_tensor(0.0)
+            )
             loss = task + args.smoothness_weight * smooth + args.logic_weight * logic
             loss.backward()
             optimizer.step()
@@ -761,7 +809,8 @@ def main() -> None:
     write_json(
         args.output_dir / "training_metadata.json",
         {
-            "feature_columns": feature_columns,
+            "feature_columns": input_feature_columns,
+            "raw_feature_columns": available_feature_columns,
             "feature_stats": stats,
             "sequence_length": args.sequence_length,
             "hidden_size": args.hidden_size,
@@ -771,6 +820,7 @@ def main() -> None:
             "persistence_prior_strength": args.persistence_prior_strength,
             "sampler": args.sampler,
             "class_weighting": args.class_weighting,
+            "feature_set": args.feature_set,
             "seed": args.seed,
             "best_epoch": best_state["epoch"],
             "best_validation": best_state["validation"],

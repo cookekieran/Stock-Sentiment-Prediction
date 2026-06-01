@@ -212,6 +212,24 @@ python src\models\explain_market_state_prediction.py `
   --date 2026-04-15
 ```
 
+Audit Qwen-driven transition overrides against the persistence baseline:
+
+```powershell
+python src\models\audit_qwen_transition_overrides.py `
+  --predictions-path models\revised_regime_price_qwen_no_rules\test_predictions.parquet `
+  --output-dir models\revised_regime_price_qwen_no_rules\transition_audit `
+  --threshold 0.21
+```
+
+The audit exports summaries and samples for true-positive overrides,
+false-positive overrides, missed transitions, and correct persistence cases.
+Each sample includes the Qwen narrative and top contextual driver.
+
+To compare forecast horizons, rebuild the article-level and daily datasets with
+`--trend-forward-days 5`, `10`, and `20`. Keep each horizon in its own output
+folder, then train the same `--feature-set price_qwen` configuration against
+each daily dataset.
+
 ## 4. Train the old DeepSeek-only baseline
 
 ```powershell

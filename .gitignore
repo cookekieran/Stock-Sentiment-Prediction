@@ -27,3 +27,4 @@ realtime data/
 .ssh/
 .ipython/
 /data/
+models/
