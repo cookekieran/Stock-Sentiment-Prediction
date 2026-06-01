@@ -25,8 +25,6 @@ TARGET_LABELS = {
 }
 
 PRICE_FEATURE_COLUMNS = [
-    "anchor_close",
-    "volume",
     "realized_volatility_20d",
     "rally_from_previous_low",
     "drawdown_from_previous_high",
@@ -34,6 +32,24 @@ PRICE_FEATURE_COLUMNS = [
     "drawdown_from_recent_high",
     "price_trend_id",
 ]
+
+NONSTATIONARY_MACRO_LEVEL_COLUMNS = {
+    "macro_core_cpi",
+    "macro_core_pce_price_index",
+    "macro_cpi",
+    "macro_fed_funds_rate",
+    "macro_fed_target_lower",
+    "macro_fed_target_upper",
+    "macro_industrial_production",
+    "macro_nonfarm_payrolls",
+    "macro_pce_price_index",
+    "macro_real_gdp",
+    "macro_trade_weighted_dollar",
+    "macro_treasury_10y",
+    "macro_treasury_2y",
+    "macro_vix",
+    "macro_wti_oil",
+}
 
 NEWS_FEATURE_COLUMNS = [
     "news_article_count",
@@ -343,7 +359,9 @@ def feature_columns(daily: pd.DataFrame) -> list[str]:
     macro_columns = sorted(
         column
         for column in daily.columns
-        if column.startswith("macro_") and pd.api.types.is_numeric_dtype(daily[column])
+        if column.startswith("macro_")
+        and column not in NONSTATIONARY_MACRO_LEVEL_COLUMNS
+        and pd.api.types.is_numeric_dtype(daily[column])
     )
     candidates = [
         "news_log_article_count",
@@ -387,6 +405,11 @@ def write_outputs(daily: pd.DataFrame, output_dir: Path, schema_path: Path) -> N
             "market_sentiment_label",
             "is_market_material",
             "is_material",
+        ],
+        "excluded_nonstationary_inputs": [
+            "anchor_close",
+            "volume",
+            *sorted(NONSTATIONARY_MACRO_LEVEL_COLUMNS),
         ],
     }
     schema_path.parent.mkdir(parents=True, exist_ok=True)

@@ -229,10 +229,15 @@ def make_monthly_features(raw: pd.DataFrame) -> pd.DataFrame:
     add_change(monthly, "fed_funds_rate", 3, "fed_funds_change_3m")
     add_change(monthly, "treasury_2y", 1, "treasury_2y_change_1m")
     add_change(monthly, "treasury_10y", 1, "treasury_10y_change_1m")
+    add_change(monthly, "unemployment_rate", 1, "unemployment_change_1m")
     add_change(monthly, "unemployment_rate", 3, "unemployment_change_3m")
     add_yoy(monthly, "nonfarm_payrolls", "nonfarm_payrolls_yoy")
     add_yoy(monthly, "industrial_production", "industrial_production_yoy")
     add_yoy(monthly, "real_gdp", "real_gdp_yoy")
+    add_pct_change(monthly, "vix", 1, "vix_change_1m")
+    add_pct_change(monthly, "wti_oil", 1, "wti_oil_change_1m")
+    add_pct_change(monthly, "trade_weighted_dollar", 1, "trade_weighted_dollar_change_1m")
+    add_change(monthly, "baa_10y_credit_spread", 1, "baa_10y_credit_spread_change_1m")
 
     monthly["high_inflation"] = (monthly["cpi_yoy"] >= 3.0).astype("Int64")
     monthly["very_high_inflation"] = (monthly["cpi_yoy"] >= 5.0).astype("Int64")
@@ -265,6 +270,11 @@ def add_yoy(df: pd.DataFrame, source_column: str, output_column: str) -> None:
 def add_change(df: pd.DataFrame, source_column: str, periods: int, output_column: str) -> None:
     if source_column in df.columns:
         df[output_column] = df[source_column].diff(periods)
+
+
+def add_pct_change(df: pd.DataFrame, source_column: str, periods: int, output_column: str) -> None:
+    if source_column in df.columns:
+        df[output_column] = df[source_column].pct_change(periods) * 100.0
 
 
 def write_outputs(

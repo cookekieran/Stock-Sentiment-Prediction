@@ -342,10 +342,10 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
     easing = get_raw(raw, feature_columns, "macro_easing_regime").clamp(0.0, 1.0)
     falling_rates = get_raw(raw, feature_columns, "macro_falling_rates").clamp(0.0, 1.0)
     inverted_curve = get_raw(raw, feature_columns, "macro_inverted_yield_curve").clamp(0.0, 1.0)
-    vix = get_raw(raw, feature_columns, "macro_vix")
-    elevated_vix = ((vix - 20.0) / 20.0).clamp(0.0, 1.0)
-    wti_oil = get_raw(raw, feature_columns, "macro_wti_oil")
-    elevated_oil = ((wti_oil - 80.0) / 40.0).clamp(0.0, 1.0)
+    vix_change = get_raw(raw, feature_columns, "macro_vix_change_1m")
+    rising_vix = (vix_change / 50.0).clamp(0.0, 1.0)
+    oil_change = get_raw(raw, feature_columns, "macro_wti_oil_change_1m")
+    rising_oil = (oil_change / 20.0).clamp(0.0, 1.0)
     unemployment = get_raw(raw, feature_columns, "macro_unemployment_rate")
     elevated_unemployment = ((unemployment - 4.0) / 2.0).clamp(0.0, 1.0)
 
@@ -356,8 +356,8 @@ def logic_loss(sequence_logits, raw, feature_columns: list[str]):
         fuzzy_implication_loss(inflation_channel * rates_channel * high_inflation * rising_rates, 1.0 - bull),
         fuzzy_implication_loss(yield_curve_channel * inverted_curve * negative_news, bear + sideways),
         fuzzy_implication_loss(rates_channel * falling_rates * easing * positive_news, 1.0 - bear),
-        fuzzy_implication_loss(volatility_channel * elevated_vix * negative_news, bear + sideways),
-        fuzzy_implication_loss(oil_channel * elevated_oil * negative_news, bear + sideways),
+        fuzzy_implication_loss(volatility_channel * rising_vix * negative_news, bear + sideways),
+        fuzzy_implication_loss(oil_channel * rising_oil * negative_news, bear + sideways),
         fuzzy_implication_loss(labor_channel * elevated_unemployment * negative_news, bear + sideways),
         fuzzy_implication_loss((conflicting_news + uncertainty).clamp(0.0, 1.0), sideways),
     ]

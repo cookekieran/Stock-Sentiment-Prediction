@@ -160,6 +160,12 @@ The latent-state features deliberately exclude forward-looking inputs such as
 `is_market_material`. Those fields are useful diagnostics, but using them as
 inputs makes the task less honest.
 
+The GRU schema also excludes raw price, volume, and non-stationary macro levels
+such as CPI, GDP, VIX, and oil-price levels. The parquet retains them for
+diagnostics. Training uses returns, drawdowns, volatility, YoY growth, monthly
+macro changes, spreads, and regime indicators to reduce chronological
+distribution-shift shortcuts.
+
 ## 3. Train the latent-state GRU model
 
 ```powershell
