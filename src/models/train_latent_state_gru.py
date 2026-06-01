@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def parse_args() -> argparse.Namespace:
         help="Fail unless contextual driver features are present and non-empty.",
     )
     parser.add_argument("--device", default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=3,
+        help="Stop after this many epochs without improved validation macro-F1. Use 0 to disable.",
+    )
     return parser.parse_args()
 
 
@@ -441,6 +449,17 @@ def evaluate(
     report["truth_counts"] = {
         LABEL_NAMES[idx]: int((y_true == idx).sum()) for idx in range(len(LABEL_NAMES))
     }
+    current_idx = feature_index(dataset.feature_columns, "price_trend_id")
+    if current_idx is not None:
+        current = np.array(
+            [int(round(float(dataset.raw[end - 1, current_idx]))) for _, end in dataset.indices],
+            dtype=np.int64,
+        ).clip(0, len(LABEL_NAMES) - 1)
+        transition = current != y_true
+        stable = ~transition
+        report["transition_rows"] = int(transition.sum())
+        report["transition_accuracy"] = float((y_pred[transition] == y_true[transition]).mean()) if transition.any() else None
+        report["stable_accuracy"] = float((y_pred[stable] == y_true[stable]).mean()) if stable.any() else None
     return report
 
 
@@ -554,6 +573,12 @@ def print_report_summary(name: str, report: dict) -> None:
     if "truth_counts" in report and "prediction_counts" in report:
         print(f"  {name} truth: {format_counts(report['truth_counts'])}")
         print(f"  {name} pred : {format_counts(report['prediction_counts'])}")
+    if "transition_rows" in report:
+        print(
+            f"  {name} transition_rows={report['transition_rows']} "
+            f"transition_accuracy={report['transition_accuracy']:.4f} "
+            f"stable_accuracy={report['stable_accuracy']:.4f}"
+        )
 
 
 def validate_contextual_driver_inputs(daily: pd.DataFrame, feature_columns: list[str]) -> None:
@@ -585,6 +610,13 @@ def validate_contextual_driver_inputs(daily: pd.DataFrame, feature_columns: list
 
 def main() -> None:
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    import torch
+
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     schema = read_schema(args.schema_path)
     daily = load_daily(args.daily_path)
     feature_columns = [column for column in schema["feature_columns"] if column in daily.columns]
@@ -638,6 +670,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     best_macro_f1 = -1.0
     best_state = None
+    epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
         model.model.train()
@@ -696,11 +729,18 @@ def main() -> None:
             print(f"  val pred : {format_counts(validation_report['prediction_counts'])}")
         if validation_report["macro_f1"] > best_macro_f1:
             best_macro_f1 = validation_report["macro_f1"]
+            epochs_without_improvement = 0
             best_state = {
                 "model": {k: v.detach().cpu().clone() for k, v in model.model.state_dict().items()},
                 "head": {k: v.detach().cpu().clone() for k, v in model.head.state_dict().items()},
                 "validation": validation_report,
+                "epoch": epoch,
             }
+        else:
+            epochs_without_improvement += 1
+            if args.early_stopping_patience and epochs_without_improvement >= args.early_stopping_patience:
+                print(f"Early stopping after epoch {epoch}; best epoch was {best_state['epoch']}.")
+                break
 
     if best_state is None:
         raise RuntimeError("Training did not produce a best model state.")
@@ -731,6 +771,8 @@ def main() -> None:
             "persistence_prior_strength": args.persistence_prior_strength,
             "sampler": args.sampler,
             "class_weighting": args.class_weighting,
+            "seed": args.seed,
+            "best_epoch": best_state["epoch"],
             "best_validation": best_state["validation"],
             "model_description": (
                 "Daily ticker-level GRU latent state updated by aggregated news, "
