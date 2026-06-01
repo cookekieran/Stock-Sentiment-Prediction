@@ -358,6 +358,57 @@ python src\models\train_material_event_gru.py `
 Repeat with `--feature-set price_only` and `--feature-set qwen_only` as
 controlled ablations.
 
+### Add leakage-safe quarterly fundamentals
+
+Alpha Vantage income statements and balance sheets use fiscal quarter-end
+dates, which must not be treated as public availability dates. Fetch the
+earnings release calendar and join each statement only after its public
+`reportedDate`. The builder applies an additional one-day delay because the
+Alpha Vantage release date does not identify whether the announcement occurred
+before or after the market close.
+
+```powershell
+python src\data\fetch_mag7_alphavantage_earnings_dates.py --start-date 2022-01-01
+
+python src\data\build_leakage_safe_fundamentals_dataset.py `
+  --daily-path data\processed\material_events_horizon_5\material_event_daily.parquet `
+  --schema-path data\processed\material_events_horizon_5\material_event_schema.json `
+  --output-dir data\processed\material_events_horizon_5_fundamentals `
+  --output-schema-path data\processed\material_events_horizon_5_fundamentals\material_event_schema.json
+```
+
+Run matched ablations with:
+
+```powershell
+foreach ($featureSet in @(
+  "price_only",
+  "price_qwen",
+  "fundamentals_only",
+  "price_fundamentals",
+  "price_qwen_fundamentals"
+)) {
+  python src\models\train_material_event_gru.py `
+    --daily-path data\processed\material_events_horizon_5_fundamentals\material_event_daily.parquet `
+    --schema-path data\processed\material_events_horizon_5_fundamentals\material_event_schema.json `
+    --feature-set $featureSet `
+    --sequence-length 10 `
+    --epochs 25 `
+    --early-stopping-patience 5 `
+    --seed 42 `
+    --batch-size 32 `
+    --hidden-size 32 `
+    --dropout 0.35 `
+    --learning-rate 0.0003 `
+    --minimum-no-event-accuracy 0.70 `
+    --save-predictions `
+    --output-dir "models\material_events_horizon_5_fundamentals\$featureSet"
+}
+```
+
+The fundamental inputs are stationary ratios and year-over-year changes. Raw
+financial levels, fiscal period ends, public release dates, forward returns,
+and target labels are not GRU inputs.
+
 ## 6. Train the old DeepSeek-only baseline
 
 ```powershell

@@ -19,7 +19,6 @@ from train_latent_state_gru import (
     LatentStateGRU,
     fit_feature_stats,
     load_daily,
-    select_feature_columns,
     transform_features,
     validate_contextual_driver_inputs,
 )
@@ -35,7 +34,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--feature-set",
-        choices=["full", "price_only", "price_macro", "price_qwen", "qwen_only"],
+        choices=[
+            "full",
+            "price_only",
+            "price_macro",
+            "price_qwen",
+            "qwen_only",
+            "fundamentals_only",
+            "price_fundamentals",
+            "price_qwen_fundamentals",
+        ],
         default="price_qwen",
     )
     parser.add_argument("--sequence-length", type=int, default=10)
@@ -89,8 +97,6 @@ def sequence_labels(dataset: MaterialEventSequenceDataset) -> np.ndarray:
 
 
 def event_feature_columns(feature_columns: list[str], feature_set: str) -> list[str]:
-    if feature_set != "qwen_only":
-        return select_feature_columns(feature_columns, feature_set)
     price_columns = {
         "realized_volatility_20d",
         "rally_from_previous_low",
@@ -99,11 +105,23 @@ def event_feature_columns(feature_columns: list[str], feature_set: str) -> list[
         "drawdown_from_recent_high",
         "price_trend_id",
     }
-    return [
-        column
-        for column in feature_columns
-        if column not in price_columns and not column.startswith("macro_")
-    ]
+    fundamentals = {column for column in feature_columns if column.startswith("fundamental_")}
+    macro = {column for column in feature_columns if column.startswith("macro_")}
+    qwen = set(feature_columns).difference(price_columns, fundamentals, macro)
+    requested = {
+        "full": set(feature_columns),
+        "price_only": price_columns,
+        "price_macro": price_columns | macro,
+        "price_qwen": price_columns | qwen,
+        "qwen_only": qwen,
+        "fundamentals_only": fundamentals,
+        "price_fundamentals": price_columns | fundamentals,
+        "price_qwen_fundamentals": price_columns | qwen | fundamentals,
+    }[feature_set]
+    selected = [column for column in feature_columns if column in requested]
+    if not selected:
+        raise ValueError(f"No features selected for feature_set={feature_set}.")
+    return selected
 
 
 def class_weights(labels: np.ndarray, mode: str, device):
