@@ -230,7 +230,73 @@ To compare forecast horizons, rebuild the article-level and daily datasets with
 folder, then train the same `--feature-set price_qwen` configuration against
 each daily dataset.
 
-## 4. Train the old DeepSeek-only baseline
+## 4. Train the two-stage transition model
+
+The three-class GRU is useful as a baseline, but stable regimes dominate its
+objective. The two-stage trainer reframes the task around market-regime changes:
+
+1. detect whether the current regime changes at the forecast horizon;
+2. if a transition is proposed, classify the destination regime.
+
+The destination loss is calculated only for genuine transition rows. At
+inference, the model preserves the current regime unless the binary transition
+detector crosses a threshold selected using validation transition F1. The
+destination head is masked so a proposed transition cannot point back to the
+current regime.
+
+Run a price-plus-Qwen experiment for each forecast horizon:
+
+```powershell
+foreach ($horizon in 5, 10, 20) {
+  python src\models\train_two_stage_transition_gru.py `
+    --daily-path "data\processed\horizon_$horizon\daily\latent_state_daily.parquet" `
+    --schema-path "data\processed\horizon_$horizon\daily\latent_state_schema.json" `
+    --feature-set price_qwen `
+    --sequence-length 10 `
+    --epochs 25 `
+    --early-stopping-patience 5 `
+    --seed 42 `
+    --batch-size 32 `
+    --hidden-size 32 `
+    --dropout 0.35 `
+    --learning-rate 0.0003 `
+    --require-contextual-drivers `
+    --save-predictions `
+    --output-dir "models\horizon_$horizon\two_stage_price_qwen"
+}
+```
+
+Repeat with `--feature-set price_only` and a separate output folder to measure
+whether Qwen predicates add signal beyond recent price dynamics.
+
+To use recent price dynamics for transition timing while restricting Qwen
+predicates to the destination classifier, run:
+
+```powershell
+python src\models\train_two_stage_transition_gru.py `
+  --daily-path data\processed\horizon_5\daily\latent_state_daily.parquet `
+  --schema-path data\processed\horizon_5\daily\latent_state_schema.json `
+  --detector-feature-set price_only `
+  --destination-feature-set price_qwen `
+  --minimum-stable-accuracy 0.70 `
+  --sequence-length 10 `
+  --epochs 25 `
+  --early-stopping-patience 5 `
+  --seed 42 `
+  --batch-size 32 `
+  --hidden-size 32 `
+  --dropout 0.35 `
+  --learning-rate 0.0003 `
+  --require-contextual-drivers `
+  --save-predictions `
+  --output-dir models\horizon_5\two_stage_split_price_detector_qwen_destination
+```
+
+The transition threshold is selected on validation final macro-F1 subject to
+the minimum stable-accuracy requirement. This prevents the binary detector from
+improving its apparent recall by proposing a transition almost every day.
+
+## 5. Train the old DeepSeek-only baseline
 
 ```powershell
 python src\models\train_deepseek_baseline.py `
@@ -249,7 +315,7 @@ python src\models\train_deepseek_baseline.py `
   --epochs 1
 ```
 
-## 5. Train the old DeepSeek+LTN model
+## 6. Train the old DeepSeek+LTN model
 
 ```powershell
 python src\models\train_deepseek_ltn.py `
