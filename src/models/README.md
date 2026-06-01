@@ -309,7 +309,56 @@ python src\models\audit_two_stage_transition_errors.py `
 The audit exports ticker-level summaries and samples with forward returns,
 largest one-day moves, gradual-move flags, Qwen narratives, and top drivers.
 
-## 5. Train the old DeepSeek-only baseline
+## 5. Train the material repricing event model
+
+Rolling regime labels can change when an older price move leaves the lookback
+window. For a cleaner news-aligned experiment, build labels that ask whether a
+ticker experiences a material repricing event during the next five trading
+days. Future returns are labels and diagnostics only; they are excluded from
+the GRU inputs.
+
+```powershell
+python src\data\build_material_event_dataset.py `
+  --daily-path data\processed\horizon_5\daily\latent_state_daily.parquet `
+  --schema-path data\processed\horizon_5\daily\latent_state_schema.json `
+  --prices-path mag7_prices\mag7_daily_prices.parquet `
+  --forecast-horizon 5 `
+  --material-return-threshold 0.05 `
+  --output-dir data\processed\material_events_horizon_5 `
+  --output-schema-path data\processed\material_events_horizon_5\material_event_schema.json
+```
+
+The target labels are:
+
+- `no_material_event`: neither threshold is crossed;
+- `risk_off_event`: price falls by at least the configured threshold;
+- `risk_on_event`: price rises by at least the configured threshold.
+
+Train the price-plus-Qwen event model:
+
+```powershell
+python src\models\train_material_event_gru.py `
+  --daily-path data\processed\material_events_horizon_5\material_event_daily.parquet `
+  --schema-path data\processed\material_events_horizon_5\material_event_schema.json `
+  --feature-set price_qwen `
+  --sequence-length 10 `
+  --epochs 25 `
+  --early-stopping-patience 5 `
+  --seed 42 `
+  --batch-size 32 `
+  --hidden-size 32 `
+  --dropout 0.35 `
+  --learning-rate 0.0003 `
+  --minimum-no-event-accuracy 0.70 `
+  --require-contextual-drivers `
+  --save-predictions `
+  --output-dir models\material_events_horizon_5\price_qwen
+```
+
+Repeat with `--feature-set price_only` and `--feature-set qwen_only` as
+controlled ablations.
+
+## 6. Train the old DeepSeek-only baseline
 
 ```powershell
 python src\models\train_deepseek_baseline.py `
@@ -328,7 +377,7 @@ python src\models\train_deepseek_baseline.py `
   --epochs 1
 ```
 
-## 6. Train the old DeepSeek+LTN model
+## 7. Train the old DeepSeek+LTN model
 
 ```powershell
 python src\models\train_deepseek_ltn.py `
