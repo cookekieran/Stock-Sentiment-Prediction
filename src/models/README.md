@@ -296,6 +296,19 @@ The transition threshold is selected on validation final macro-F1 subject to
 the minimum stable-accuracy requirement. This prevents the binary detector from
 improving its apparent recall by proposing a transition almost every day.
 
+Audit false positives and missed transitions against the forward price path:
+
+```powershell
+python src\models\audit_two_stage_transition_errors.py `
+  --predictions-path models\horizon_5\two_stage_split_price_detector_price_destination\test_predictions.parquet `
+  --daily-path data\processed\horizon_5\daily\latent_state_daily.parquet `
+  --forecast-horizon 5 `
+  --output-dir models\horizon_5\two_stage_split_price_detector_price_destination\transition_error_audit
+```
+
+The audit exports ticker-level summaries and samples with forward returns,
+largest one-day moves, gradual-move flags, Qwen narratives, and top drivers.
+
 ## 5. Train the old DeepSeek-only baseline
 
 ```powershell
