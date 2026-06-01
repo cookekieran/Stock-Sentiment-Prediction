@@ -30,6 +30,8 @@ PRICE_FEATURE_COLUMNS = [
     "realized_volatility_20d",
     "rally_from_previous_low",
     "drawdown_from_previous_high",
+    "recent_return",
+    "drawdown_from_recent_high",
     "price_trend_id",
 ]
 
@@ -272,6 +274,8 @@ def aggregate_day(group: pd.DataFrame, relevance_threshold: float) -> pd.Series:
         "realized_volatility_20d",
         "rally_from_previous_low",
         "drawdown_from_previous_high",
+        "recent_return",
+        "drawdown_from_recent_high",
         "price_trend_label",
         "price_trend_id",
         "future_price_trend_label",

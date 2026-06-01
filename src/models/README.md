@@ -49,6 +49,17 @@ The supervised target is `future_price_trend_id`:
 - `1`: `sideways`
 - `2`: `bull_rally`
 
+The current regime is based on backward-looking price context:
+
+- `bull_rally`: 20-trading-day return is at least `+5%`
+- `bear_drawdown`: 20-trading-day return is at most `-5%`, or the price is at
+  least `10%` below its previous 60-trading-day high
+- `sideways`: neither directional condition is active
+
+The supervised target is that regime shifted 20 trading days into the future.
+The older 120-day rally and drawdown features remain available as diagnostics,
+but they no longer define the target label.
+
 ## 2. Build the latent-state daily dataset
 
 This is the newer project direction. It aggregates many article rows into one

@@ -94,7 +94,37 @@ def parse_args() -> argparse.Namespace:
         "--trend-threshold",
         type=float,
         default=0.20,
-        help="Rally/drawdown threshold for bull/bear trend labels.",
+        help="Legacy rally/drawdown threshold retained for diagnostic features.",
+    )
+    parser.add_argument(
+        "--regime-return-window-days",
+        type=int,
+        default=20,
+        help="Trading-day return lookback used for directional bull/bear regime labels.",
+    )
+    parser.add_argument(
+        "--regime-drawdown-window-days",
+        type=int,
+        default=60,
+        help="Trading-day high-water-mark lookback used for bear regime labels.",
+    )
+    parser.add_argument(
+        "--regime-bull-return-threshold",
+        type=float,
+        default=0.05,
+        help="Recent return at or above this value is labelled bull_rally.",
+    )
+    parser.add_argument(
+        "--regime-bear-return-threshold",
+        type=float,
+        default=-0.05,
+        help="Recent return at or below this value is labelled bear_drawdown.",
+    )
+    parser.add_argument(
+        "--regime-bear-drawdown-threshold",
+        type=float,
+        default=-0.10,
+        help="Drawdown from the recent high at or below this value is labelled bear_drawdown.",
     )
     parser.add_argument(
         "--trend-forward-days",
@@ -185,6 +215,11 @@ def normalise_prices(
     prices: pd.DataFrame,
     trend_window_days: int,
     trend_threshold: float,
+    regime_return_window_days: int,
+    regime_drawdown_window_days: int,
+    regime_bull_return_threshold: float,
+    regime_bear_return_threshold: float,
+    regime_bear_drawdown_threshold: float,
     trend_forward_days: int,
 ) -> pd.DataFrame:
     prices = prices.copy()
@@ -228,15 +263,24 @@ def normalise_prices(
     prices["drawdown_from_previous_high"] = (
         prices["close_for_return"] / prices["previous_high"] - 1.0
     )
-    has_trend_history = prices["previous_low"].notna() & prices["previous_high"].notna()
+    prices["recent_return"] = grouped["close_for_return"].pct_change(regime_return_window_days)
+    prices["recent_high"] = grouped["close_for_return"].transform(
+        lambda values: values.shift(1).rolling(regime_drawdown_window_days, min_periods=20).max()
+    )
+    prices["drawdown_from_recent_high"] = prices["close_for_return"] / prices["recent_high"] - 1.0
+    has_trend_history = prices["recent_return"].notna() & prices["recent_high"].notna()
     prices["price_trend_label"] = pd.Series(pd.NA, index=prices.index, dtype="object")
     prices.loc[has_trend_history, "price_trend_label"] = "sideways"
     prices.loc[
-        has_trend_history & (prices["rally_from_previous_low"] >= trend_threshold),
+        has_trend_history & (prices["recent_return"] >= regime_bull_return_threshold),
         "price_trend_label",
     ] = "bull_rally"
     prices.loc[
-        has_trend_history & (prices["drawdown_from_previous_high"] <= -trend_threshold),
+        has_trend_history
+        & (
+            (prices["recent_return"] <= regime_bear_return_threshold)
+            | (prices["drawdown_from_recent_high"] <= regime_bear_drawdown_threshold)
+        ),
         "price_trend_label",
     ] = "bear_drawdown"
 
@@ -260,6 +304,9 @@ def normalise_prices(
             "previous_high",
             "rally_from_previous_low",
             "drawdown_from_previous_high",
+            "recent_return",
+            "recent_high",
+            "drawdown_from_recent_high",
             "price_trend_label",
             "price_trend_id",
             "future_price_trend_label",
@@ -563,6 +610,11 @@ def main() -> None:
         prices_raw,
         trend_window_days=args.trend_window_days,
         trend_threshold=args.trend_threshold,
+        regime_return_window_days=args.regime_return_window_days,
+        regime_drawdown_window_days=args.regime_drawdown_window_days,
+        regime_bull_return_threshold=args.regime_bull_return_threshold,
+        regime_bear_return_threshold=args.regime_bear_return_threshold,
+        regime_bear_drawdown_threshold=args.regime_bear_drawdown_threshold,
         trend_forward_days=args.trend_forward_days,
     )
 
