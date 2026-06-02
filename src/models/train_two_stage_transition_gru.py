@@ -32,7 +32,6 @@ from train_latent_state_gru import (
     load_daily,
     raw_features,
     read_schema,
-    select_feature_columns,
     sequence_labels,
     transform_features,
     validate_contextual_driver_inputs,
@@ -44,16 +43,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--daily-path", type=Path, required=True)
     parser.add_argument("--schema-path", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("models/two_stage_transition_gru"))
-    parser.add_argument("--feature-set", choices=["full", "price_only", "price_macro", "price_qwen"], default="price_qwen")
+    parser.add_argument(
+        "--feature-set",
+        choices=["full", "price_only", "price_macro", "price_qwen", "price_fundamentals", "price_qwen_fundamentals"],
+        default="price_qwen",
+    )
     parser.add_argument(
         "--detector-feature-set",
-        choices=["full", "price_only", "price_macro", "price_qwen"],
+        choices=["full", "price_only", "price_macro", "price_qwen", "price_fundamentals", "price_qwen_fundamentals"],
         default=None,
         help="Override --feature-set for the transition detector.",
     )
     parser.add_argument(
         "--destination-feature-set",
-        choices=["full", "price_only", "price_macro", "price_qwen"],
+        choices=["full", "price_only", "price_macro", "price_qwen", "price_fundamentals", "price_qwen_fundamentals"],
         default=None,
         help="Override --feature-set for the destination classifier.",
     )
@@ -95,6 +98,32 @@ def current_regime_ids(dataset: DailySequenceDataset) -> np.ndarray:
 
 def transition_labels(dataset: DailySequenceDataset) -> np.ndarray:
     return (sequence_labels(dataset) != current_regime_ids(dataset)).astype(np.int64)
+
+
+def transition_feature_columns(feature_columns: list[str], feature_set: str) -> list[str]:
+    price_columns = {
+        "realized_volatility_20d",
+        "rally_from_previous_low",
+        "drawdown_from_previous_high",
+        "recent_return",
+        "drawdown_from_recent_high",
+        "price_trend_id",
+    }
+    fundamentals = {column for column in feature_columns if column.startswith("fundamental_")}
+    macro = {column for column in feature_columns if column.startswith("macro_")}
+    qwen = set(feature_columns).difference(price_columns, fundamentals, macro)
+    requested = {
+        "full": set(feature_columns),
+        "price_only": price_columns,
+        "price_macro": price_columns | macro,
+        "price_qwen": price_columns | qwen,
+        "price_fundamentals": price_columns | fundamentals,
+        "price_qwen_fundamentals": price_columns | qwen | fundamentals,
+    }[feature_set]
+    selected = [column for column in feature_columns if column in requested]
+    if not selected:
+        raise ValueError(f"No features selected for feature_set={feature_set}.")
+    return selected
 
 
 class DualInputSequenceDataset:
@@ -420,8 +449,8 @@ def main() -> None:
         validate_contextual_driver_inputs(daily, available_features)
     detector_feature_set = args.detector_feature_set or args.feature_set
     destination_feature_set = args.destination_feature_set or args.feature_set
-    detector_features = select_feature_columns(available_features, detector_feature_set)
-    destination_features = select_feature_columns(available_features, destination_feature_set)
+    detector_features = transition_feature_columns(available_features, detector_feature_set)
+    destination_features = transition_feature_columns(available_features, destination_feature_set)
     if "price_trend_id" not in available_features:
         raise ValueError("price_trend_id must be present to define transition labels.")
 

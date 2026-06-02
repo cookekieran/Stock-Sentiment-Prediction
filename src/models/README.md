@@ -431,6 +431,22 @@ For each horizon, compare `price_only` against `price_qwen` trained on the
 matched `raw` and `filtered` folders. Select thresholds using the validation
 split only.
 
+Quarterly fundamentals can be joined to each filtered horizon dataset with:
+
+```powershell
+foreach ($horizon in @(5, 10, 20, 45)) {
+  python src\data\build_leakage_safe_fundamentals_dataset.py `
+    --daily-path "data\processed\qwen_quality_filter_transition_ablation\horizon_$horizon\filtered\latent_state_daily.parquet" `
+    --schema-path "data\processed\qwen_quality_filter_transition_ablation\horizon_$horizon\filtered\latent_state_schema.json" `
+    --output-dir "data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_$horizon" `
+    --output-schema-path "data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_$horizon\latent_state_schema.json" `
+    --output-stem latent_state
+}
+```
+
+Use `--feature-set price_qwen_fundamentals` to train the combined transition
+model. Use `--feature-set price_fundamentals` as the matched control.
+
 ## 6. Train the old DeepSeek-only baseline
 
 ```powershell

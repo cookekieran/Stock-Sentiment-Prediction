@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-schema-path", type=Path, required=True)
+    parser.add_argument("--output-stem", default="material_event")
     parser.add_argument("--release-delay-days", type=int, default=1)
     parser.add_argument("--fallback-reporting-lag-days", type=int, default=45)
     return parser.parse_args()
@@ -239,10 +240,10 @@ def main() -> None:
         ),
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    joined.to_parquet(args.output_dir / "material_event_daily.parquet", index=False)
+    joined.to_parquet(args.output_dir / f"{args.output_stem}_daily.parquet", index=False)
     quarterly.to_parquet(args.output_dir / "fundamentals_quarterly_features.parquet", index=False)
     for split, part in joined.groupby("split", sort=False):
-        part.to_parquet(args.output_dir / f"material_event_{split}.parquet", index=False)
+        part.to_parquet(args.output_dir / f"{args.output_stem}_{split}.parquet", index=False)
     args.output_schema_path.parent.mkdir(parents=True, exist_ok=True)
     args.output_schema_path.write_text(json.dumps(output_schema, indent=2), encoding="utf-8")
 
