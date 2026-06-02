@@ -31,7 +31,7 @@ that fixed boundary.
 The first artifact is one row per ticker/trading day containing:
 
 - the raw daily news packet used by the live Qwen encoder;
-- article metadata and weak semantic labels for later predicate supervision;
+- article metadata and automated weak semantic labels for predicate supervision;
 - contemporaneous price context;
 - leakage-safe public quarterly fundamentals;
 - current and future regime labels;
@@ -48,11 +48,29 @@ The builder deliberately excludes saved Qwen narratives, predicates, and raw
 generations. Future regime labels remain targets only. Fundamentals are audited
 to ensure that their public availability date never exceeds the anchor date.
 
-## 2. Create A Predicate-Review Template
+Automated predicate targets are calculated from contemporaneous article
+relevance and bullish/bearish sentiment:
 
-The Qwen predicate heads need a manually reviewed subset. The template samples
-packets across tickers, chronological splits, transition status, and weak
-relevance bands while hiding future regime labels from the reviewer.
+```text
+weak_label_ticker_relevance
+weak_label_materiality
+weak_label_risk_on_pressure
+weak_label_risk_off_pressure
+weak_label_uncertainty
+```
+
+These labels supervise the live Qwen predicate heads without using future price
+movements. Future bullish, sideways, and bearish regime labels supervise the
+downstream GRU transition task separately.
+
+## 2. Optional Predicate Review
+
+Manual review is optional. It is useful only if the dissertation needs an
+independent semantic-quality evaluation of whether Qwen learned sensible
+relevance and materiality predicates. It is not required to train the automated
+pipeline. The template samples packets across tickers, chronological splits,
+transition status, and weak relevance bands while hiding future regime labels
+from the reviewer.
 
 ```powershell
 conda run -n stocks_env python src\end_to_end_neurosymbolic\build_predicate_annotation_template.py `
@@ -61,15 +79,97 @@ conda run -n stocks_env python src\end_to_end_neurosymbolic\build_predicate_anno
   --rows-per-split 150
 ```
 
-Reviewers should score numeric predicate fields from `0.0` to `1.0`, then add
-event-type and scope categories. This reviewed subset supports both predicate
-supervision and held-out predicate-quality evaluation.
+If used, reviewers should score numeric predicate fields from `0.0` to `1.0`,
+then add event-type and scope categories.
 
 ## Next Implementation Steps
 
-1. Review and label the stratified subset of packets for ticker relevance,
-   materiality, directional pressure, uncertainty, and event type.
-2. Add a Qwen + QLoRA packet encoder with trainable semantic predicate heads.
-3. Feed daily predicate vectors, price context, and fundamentals into a GRU.
-4. Ground quantified LTN formulas over packet-day examples and optimize logical
-   satisfaction jointly with supervised predicate and transition losses.
+## 3. Train Live Qwen + QLoRA + GRU + LTN
+
+`train_qwen_qlora_gru_ltn.py` implements the first fully integrated training
+graph:
+
+```text
+raw packet text
+        |
+        v
+live Qwen2.5-7B-Instruct + QLoRA adapters
+        |
+        v
+five differentiable semantic predicate heads
+        |
+        v
+daily predicate vector + price context + public fundamentals
+        |
+        v
+ticker-sequence GRU
+        |
+        v
+transition, destination, and market-reaction heads
+        |
+        v
+supervised losses + quantified fuzzy-LTN knowledge-base loss
+```
+
+The quantified LTN formulas currently encode:
+
+- irrelevant news implies low materiality;
+- conflicting risk-on and risk-off news implies uncertainty;
+- weak news implies regime persistence;
+- aligned fundamental deterioration and risk-off news imply a transition;
+- a risk-off transition implies a bear destination;
+- aligned fundamental improvement and risk-on news imply a transition;
+- a risk-on transition implies a bull destination;
+- risk-on evidence can move an existing bear state away from bear;
+- risk-off evidence can move an existing bull state away from bull;
+- conflicting transition evidence implies a sideways destination.
+
+Install the GPU dependencies inside the Jupyter container:
+
+```bash
+python -m pip install -r src/end_to_end_neurosymbolic/requirements-gpu.in
+```
+
+Run a tiny GPU smoke test first:
+
+```bash
+python src/end_to_end_neurosymbolic/train_qwen_qlora_gru_ltn.py \
+  --daily-packets-path data/processed/end_to_end_neurosymbolic/horizon_20/daily_packets.parquet \
+  --output-dir models/end_to_end_neurosymbolic/smoke_qwen_qlora_gru_ltn \
+  --epochs 1 \
+  --batch-size 1 \
+  --gradient-accumulation-steps 1 \
+  --max-train-sequences 2 \
+  --max-validation-sequences 2 \
+  --max-test-sequences 2
+```
+
+After that succeeds, run the first baseline:
+
+```bash
+python src/end_to_end_neurosymbolic/train_qwen_qlora_gru_ltn.py \
+  --daily-packets-path data/processed/end_to_end_neurosymbolic/horizon_20/daily_packets.parquet \
+  --output-dir models/end_to_end_neurosymbolic/qwen_qlora_gru_ltn_seed42 \
+  --epochs 3 \
+  --batch-size 1 \
+  --gradient-accumulation-steps 8 \
+  --seed 42
+```
+
+The trainer saves:
+
+- the Qwen QLoRA adapter;
+- the predicate, GRU, transition, destination, and reaction heads;
+- validation PR-AUC;
+- test PR-AUC from the restored best-validation checkpoint;
+- quantified formula-satisfaction values;
+- training metadata and feature normalization statistics.
+
+## Next Implementation Steps
+
+1. Run the tiny Qwen QLoRA smoke test in the GPU container.
+2. Add test-set evaluation and prediction exports after GPU memory behavior is
+   confirmed.
+3. Compare ablations with the LTN and predicate-supervision losses disabled.
+4. Extend the quantified knowledge base with earnings-event predicates and
+   trailing semantic persistence after the initial integrated run is stable.

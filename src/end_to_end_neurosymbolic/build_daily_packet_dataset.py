@@ -62,6 +62,11 @@ def clean_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
+def finite_float(value: object, default: float = 0.0) -> float:
+    numeric = pd.to_numeric(value, errors="coerce")
+    return float(numeric) if pd.notna(numeric) and np.isfinite(numeric) else default
+
+
 def article_payload(row: pd.Series, max_article_chars: int) -> dict[str, object]:
     title = clean_text(row.get("title", ""))
     summary = clean_text(row.get("summary", ""))
@@ -77,10 +82,8 @@ def article_payload(row: pd.Series, max_article_chars: int) -> dict[str, object]
         "title": title,
         "text": body[:max_article_chars],
         "source": clean_text(row.get("source", "")),
-        "weak_relevance_score": float(pd.to_numeric(row.get("relevance_score"), errors="coerce") or 0.0),
-        "weak_ticker_sentiment_score": float(
-            pd.to_numeric(row.get("ticker_sentiment_score"), errors="coerce") or 0.0
-        ),
+        "weak_relevance_score": finite_float(row.get("relevance_score")),
+        "weak_ticker_sentiment_score": finite_float(row.get("ticker_sentiment_score")),
     }
 
 
@@ -122,7 +125,27 @@ def aggregate_articles(
             article_payload(row, max_article_chars)
             for _, row in selected.iterrows()
         ]
-        relevance = [float(article["weak_relevance_score"]) for article in payloads]
+        relevance = np.array(
+            [float(article["weak_relevance_score"]) for article in payloads],
+            dtype=float,
+        ).clip(0.0, 1.0)
+        sentiment = np.array(
+            [float(article["weak_ticker_sentiment_score"]) for article in payloads],
+            dtype=float,
+        ).clip(-1.0, 1.0)
+        relevance_total = float(relevance.sum())
+        relevance_weights = (
+            relevance / relevance_total
+            if relevance_total > 0.0
+            else np.full(len(payloads), 1.0 / max(len(payloads), 1))
+        )
+        directional_pressure = float(np.sum(relevance_weights * sentiment)) if len(payloads) else 0.0
+        sentiment_dispersion = (
+            float(np.sum(relevance_weights * np.abs(sentiment - directional_pressure)))
+            if len(payloads)
+            else 0.0
+        )
+        materiality_proxy = float(np.max(relevance * np.abs(sentiment))) if len(payloads) else 0.0
         rows.append(
             {
                 "ticker": str(ticker),
@@ -130,8 +153,20 @@ def aggregate_articles(
                 "packet_article_count": len(payloads),
                 "packet_text": format_packet(str(ticker), anchor_date, payloads),
                 "packet_articles_json": json.dumps(payloads),
-                "weak_packet_mean_relevance": float(np.mean(relevance)) if relevance else 0.0,
-                "weak_packet_max_relevance": float(np.max(relevance)) if relevance else 0.0,
+                "weak_packet_mean_relevance": float(np.mean(relevance)) if len(relevance) else 0.0,
+                "weak_packet_max_relevance": float(np.max(relevance)) if len(relevance) else 0.0,
+                "weak_label_ticker_relevance": float(np.max(relevance)) if len(relevance) else 0.0,
+                "weak_label_materiality": materiality_proxy,
+                "weak_label_risk_on_pressure": max(directional_pressure, 0.0),
+                "weak_label_risk_off_pressure": max(-directional_pressure, 0.0),
+                "weak_label_uncertainty": float(
+                    np.clip(
+                        0.5 * sentiment_dispersion
+                        + 0.5 * (1.0 - materiality_proxy),
+                        0.0,
+                        1.0,
+                    )
+                ),
             }
         )
     return pd.DataFrame(rows)
@@ -217,6 +252,13 @@ def main() -> None:
         "split_counts": {key: int(value) for key, value in dataset["split"].value_counts().items()},
         "text_column": "packet_text",
         "article_metadata_column": "packet_articles_json",
+        "automated_weak_predicate_columns": [
+            "weak_label_ticker_relevance",
+            "weak_label_materiality",
+            "weak_label_risk_on_pressure",
+            "weak_label_risk_off_pressure",
+            "weak_label_uncertainty",
+        ],
         "price_context_columns": [column for column in PRICE_CONTEXT_COLUMNS if column in dataset],
         "fundamental_columns": [
             column
@@ -229,7 +271,9 @@ def main() -> None:
             "Packet text includes only articles assigned to the anchor trading date. "
             "Fundamentals are retained only from the existing leakage-safe daily dataset and "
             "audited so public availability never exceeds the anchor date. Future regime fields "
-            "are targets only. Saved offline Qwen predicates are deliberately excluded."
+            "are downstream targets only. Automated semantic weak labels use contemporaneous "
+            "article relevance and bullish/bearish sentiment only. Saved offline Qwen predicates "
+            "are deliberately excluded."
         ),
     }
     write_outputs(args.output_dir, dataset, schema)
