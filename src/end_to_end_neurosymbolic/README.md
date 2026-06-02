@@ -151,8 +151,9 @@ python src/end_to_end_neurosymbolic/train_qwen_qlora_gru_ltn.py \
   --daily-packets-path data/processed/end_to_end_neurosymbolic/horizon_20/daily_packets.parquet \
   --output-dir models/end_to_end_neurosymbolic/qwen_qlora_gru_ltn_seed42 \
   --epochs 3 \
-  --batch-size 1 \
+  --batch-size 2 \
   --gradient-accumulation-steps 8 \
+  --log-every 25 \
   --seed 42
 ```
 
@@ -162,14 +163,29 @@ The trainer saves:
 - the predicate, GRU, transition, destination, and reaction heads;
 - validation PR-AUC;
 - test PR-AUC from the restored best-validation checkpoint;
+- validation-only threshold tuning and thresholded test metrics;
+- validation and test prediction parquets with learned semantic predicates;
 - quantified formula-satisfaction values;
 - training metadata and feature normalization statistics.
+- a resumable checkpoint after every epoch.
+
+If a run stops after a completed epoch, resume it with:
+
+```bash
+python src/end_to_end_neurosymbolic/train_qwen_qlora_gru_ltn.py \
+  --daily-packets-path data/processed/end_to_end_neurosymbolic/horizon_20/daily_packets.parquet \
+  --output-dir models/end_to_end_neurosymbolic/qwen_qlora_gru_ltn_seed42 \
+  --epochs 3 \
+  --batch-size 2 \
+  --gradient-accumulation-steps 8 \
+  --log-every 25 \
+  --seed 42 \
+  --resume-checkpoint models/end_to_end_neurosymbolic/qwen_qlora_gru_ltn_seed42/latest_training_checkpoint.pt
+```
 
 ## Next Implementation Steps
 
 1. Run the tiny Qwen QLoRA smoke test in the GPU container.
-2. Add test-set evaluation and prediction exports after GPU memory behavior is
-   confirmed.
-3. Compare ablations with the LTN and predicate-supervision losses disabled.
-4. Extend the quantified knowledge base with earnings-event predicates and
+2. Compare ablations with the LTN and predicate-supervision losses disabled.
+3. Extend the quantified knowledge base with earnings-event predicates and
    trailing semantic persistence after the initial integrated run is stable.

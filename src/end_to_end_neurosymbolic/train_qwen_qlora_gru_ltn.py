@@ -81,6 +81,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-sequences", type=int, default=None)
     parser.add_argument("--max-validation-sequences", type=int, default=None)
     parser.add_argument("--max-test-sequences", type=int, default=None)
+    parser.add_argument("--minimum-stable-accuracy", type=float, default=0.70)
+    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--resume-checkpoint", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-4bit", action="store_true")
@@ -129,6 +132,7 @@ class PacketSequenceDataset:
         stats: dict[str, dict[str, float]],
         sequence_length: int,
         max_sequences: int | None,
+        seed: int,
     ):
         import torch
 
@@ -153,13 +157,35 @@ class PacketSequenceDataset:
             for end_offset in range(sequence_length, len(positions) + 1):
                 window = positions[end_offset - sequence_length : end_offset]
                 self.indices.append((int(window[0]), int(window[-1]) + 1))
-        if max_sequences is not None:
-            self.indices = self.indices[:max_sequences]
+        if max_sequences is not None and len(self.indices) > max_sequences:
+            self.indices = self.stratified_sample_indices(max_sequences, seed)
         if not self.indices:
             raise ValueError("No sequences created. Reduce --sequence-length.")
 
     def __len__(self) -> int:
         return len(self.indices)
+
+    def stratified_sample_indices(self, max_sequences: int, seed: int) -> list[tuple[int, int]]:
+        rng = np.random.default_rng(seed)
+        strata: dict[tuple[str, bool, int], list[tuple[int, int]]] = {}
+        for start, end in self.indices:
+            current = int(self.current[end - 1])
+            future = int(self.future[end - 1])
+            ticker = str(self.df.iloc[end - 1]["ticker"])
+            strata.setdefault((ticker, current != future, future), []).append((start, end))
+        sampled = []
+        for values in strata.values():
+            count = max(1, int(round(max_sequences * len(values) / len(self.indices))))
+            selected = rng.choice(len(values), size=min(count, len(values)), replace=False)
+            sampled.extend(values[index] for index in selected)
+        if len(sampled) > max_sequences:
+            selected = rng.choice(len(sampled), size=max_sequences, replace=False)
+            sampled = [sampled[index] for index in selected]
+        elif len(sampled) < max_sequences:
+            remaining = list(set(self.indices).difference(sampled))
+            selected = rng.choice(len(remaining), size=min(max_sequences - len(sampled), len(remaining)), replace=False)
+            sampled.extend(remaining[index] for index in selected)
+        return sorted(sampled)
 
     def __getitem__(self, idx: int) -> dict[str, object]:
         start, end = self.indices[idx]
@@ -169,6 +195,8 @@ class PacketSequenceDataset:
             "weak_predicates": self.predicates[start:end],
             "current": self.current[end - 1],
             "future": self.future[end - 1],
+            "ticker": str(self.df.iloc[end - 1]["ticker"]),
+            "anchor_trading_date": pd.Timestamp(self.df.iloc[end - 1]["anchor_trading_date"]).date().isoformat(),
         }
 
 
@@ -181,6 +209,8 @@ def collate_sequences(batch: list[dict[str, object]]) -> dict[str, object]:
         "weak_predicates": torch.stack([item["weak_predicates"] for item in batch]),
         "current": torch.stack([item["current"] for item in batch]),
         "future": torch.stack([item["future"] for item in batch]),
+        "ticker": [item["ticker"] for item in batch],
+        "anchor_trading_date": [item["anchor_trading_date"] for item in batch],
     }
 
 
@@ -235,11 +265,15 @@ def load_qwen_qlora(args: argparse.Namespace):
         args.model_id,
         trust_remote_code=True,
         quantization_config=quantization_config,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
     )
     if quantization_config is not None:
         qwen = prepare_model_for_kbit_training(qwen)
+        qwen.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+    qwen.config.use_cache = False
     lora_config = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
@@ -443,14 +477,95 @@ def summarize_epoch(metric_rows: list[dict[str, float]]) -> dict[str, float]:
     }
 
 
-def evaluate(model, loader, args: argparse.Namespace) -> dict[str, object]:
+def classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    from sklearn.metrics import accuracy_score, f1_score
+
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", labels=[0, 1, 2], zero_division=0)),
+    }
+
+
+def binary_metrics(y_true: np.ndarray, probabilities: np.ndarray, threshold: float) -> dict[str, float]:
+    from sklearn.metrics import average_precision_score, precision_recall_fscore_support, roc_auc_score
+
+    predicted = probabilities >= threshold
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true,
+        predicted,
+        average="binary",
+        zero_division=0,
+    )
+    return {
+        "threshold": float(threshold),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "pr_auc": float(average_precision_score(y_true, probabilities)),
+        "roc_auc": float(roc_auc_score(y_true, probabilities)) if len(np.unique(y_true)) > 1 else None,
+        "actual_transition_rows": int(y_true.sum()),
+        "predicted_transition_rows": int(predicted.sum()),
+    }
+
+
+def regime_metrics(
+    true_ids: np.ndarray,
+    current_ids: np.ndarray,
+    destination_ids: np.ndarray,
+    transition_probabilities: np.ndarray,
+    threshold: float,
+) -> dict[str, float]:
+    actual_transition = true_ids != current_ids
+    predicted_transition = transition_probabilities >= threshold
+    final_ids = np.where(predicted_transition, destination_ids, current_ids)
+    return {
+        **classification_metrics(true_ids, final_ids),
+        "transition_accuracy": (
+            float((final_ids[actual_transition] == true_ids[actual_transition]).mean())
+            if actual_transition.any()
+            else None
+        ),
+        "stable_accuracy": (
+            float((final_ids[~actual_transition] == true_ids[~actual_transition]).mean())
+            if (~actual_transition).any()
+            else None
+        ),
+    }
+
+
+def tune_threshold(arrays: dict[str, np.ndarray], minimum_stable_accuracy: float) -> float:
+    reports = []
+    for threshold in np.linspace(0.05, 0.95, 91):
+        regime = regime_metrics(
+            arrays["future_id"],
+            arrays["current_id"],
+            arrays["destination_id"],
+            arrays["transition_probability"],
+            float(threshold),
+        )
+        detector = binary_metrics(
+            arrays["future_id"] != arrays["current_id"],
+            arrays["transition_probability"],
+            float(threshold),
+        )
+        reports.append({**detector, **regime})
+    eligible = [
+        report
+        for report in reports
+        if report["stable_accuracy"] is not None
+        and report["stable_accuracy"] >= minimum_stable_accuracy
+    ]
+    if not eligible:
+        eligible = reports
+    return float(max(eligible, key=lambda report: (report["macro_f1"], report["f1"], report["precision"]))["threshold"])
+
+
+def evaluate(model, loader, args: argparse.Namespace, threshold: float | None = None) -> tuple[dict[str, object], pd.DataFrame]:
     import torch
-    from sklearn.metrics import average_precision_score
 
     model.eval()
     metrics = []
-    probabilities = []
-    targets = []
+    rows = []
     formula_totals: dict[str, list[float]] = {}
     with torch.no_grad():
         for batch in loader:
@@ -458,19 +573,70 @@ def evaluate(model, loader, args: argparse.Namespace) -> dict[str, object]:
             outputs = model.forward(batch, args.max_length)
             _, batch_metrics, satisfactions = compute_losses(outputs, batch, args)
             metrics.append(batch_metrics)
-            probabilities.extend(outputs.transition_logits.sigmoid().cpu().tolist())
+            probabilities = outputs.transition_logits.sigmoid().cpu().numpy()
+            destination_logits = outputs.destination_logits.clone()
             current = batch["current"].cpu().numpy()
             future = batch["future"].cpu().numpy()
-            targets.extend((current != future).astype(np.int64).tolist())
+            destination_logits.scatter_(
+                1,
+                torch.tensor(current, device=destination_logits.device)[:, None],
+                float("-inf"),
+            )
+            destination_probabilities = destination_logits.softmax(dim=-1).cpu().numpy()
+            destinations = destination_probabilities.argmax(axis=1)
+            predicted_predicates = outputs.predicates[:, -1].cpu().numpy()
+            for index in range(len(current)):
+                row = {
+                    "ticker": batch["ticker"][index],
+                    "anchor_trading_date": batch["anchor_trading_date"][index],
+                    "current_id": int(current[index]),
+                    "future_id": int(future[index]),
+                    "is_transition": bool(current[index] != future[index]),
+                    "transition_probability": float(probabilities[index]),
+                    "destination_id": int(destinations[index]),
+                    "destination_prob_bear": float(destination_probabilities[index, 0]),
+                    "destination_prob_sideways": float(destination_probabilities[index, 1]),
+                    "destination_prob_bull": float(destination_probabilities[index, 2]),
+                    "reaction_score": float(torch.tanh(outputs.reaction[index]).cpu()),
+                }
+                for predicate_index, predicate_name in enumerate(PREDICATE_NAMES):
+                    row[f"predicate_{predicate_name}"] = float(predicted_predicates[index, predicate_index])
+                rows.append(row)
             for name, satisfaction in satisfactions.items():
                 formula_totals.setdefault(name, []).append(float(satisfaction.cpu()))
+    predictions = pd.DataFrame(rows)
+    arrays = {
+        "future_id": predictions["future_id"].to_numpy(np.int64),
+        "current_id": predictions["current_id"].to_numpy(np.int64),
+        "destination_id": predictions["destination_id"].to_numpy(np.int64),
+        "transition_probability": predictions["transition_probability"].to_numpy(float),
+    }
+    if threshold is None:
+        threshold = tune_threshold(arrays, args.minimum_stable_accuracy)
+    predictions["predicted_transition"] = predictions["transition_probability"] >= threshold
+    predictions["predicted_id"] = np.where(
+        predictions["predicted_transition"],
+        predictions["destination_id"],
+        predictions["current_id"],
+    )
     summary = summarize_epoch(metrics)
-    summary["transition_pr_auc"] = float(average_precision_score(targets, probabilities))
+    summary["transition_detector"] = binary_metrics(
+        arrays["future_id"] != arrays["current_id"],
+        arrays["transition_probability"],
+        threshold,
+    )
+    summary["final_regime"] = regime_metrics(
+        arrays["future_id"],
+        arrays["current_id"],
+        arrays["destination_id"],
+        arrays["transition_probability"],
+        threshold,
+    )
     summary["formula_satisfaction"] = {
         name: float(np.mean(values))
         for name, values in formula_totals.items()
     }
-    return summary
+    return summary, predictions
 
 
 def save_adapter_and_heads(model, output_dir: Path, metadata: dict[str, object]) -> None:
@@ -495,6 +661,11 @@ def save_adapter_and_heads(model, output_dir: Path, metadata: dict[str, object])
     )
 
 
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def capture_model_state(model) -> dict[str, object]:
     from peft import get_peft_model_state_dict
 
@@ -512,6 +683,14 @@ def capture_model_state(model) -> dict[str, object]:
         "transition_head": cpu_state(model.transition_head),
         "destination_head": cpu_state(model.destination_head),
         "reaction_head": cpu_state(model.reaction_head),
+    }
+
+
+def trainable_parameter_summary(model) -> dict[str, int]:
+    parameters = list(model.parameters())
+    return {
+        "trainable": int(sum(parameter.numel() for parameter in parameters if parameter.requires_grad)),
+        "total_exposed": int(sum(parameter.numel() for parameter in parameters)),
     }
 
 
@@ -568,18 +747,21 @@ def main() -> None:
         stats,
         args.sequence_length,
         args.max_train_sequences,
+        args.seed,
     )
     validation = PacketSequenceDataset(
         packets[packets["split"] == "validation"],
         stats,
         args.sequence_length,
         args.max_validation_sequences,
+        args.seed,
     )
     test = PacketSequenceDataset(
         packets[packets["split"] == "test"],
         stats,
         args.sequence_length,
         args.max_test_sequences,
+        args.seed,
     )
     train_loader = DataLoader(
         train,
@@ -602,11 +784,30 @@ def main() -> None:
     model = EndToEndNeuroSymbolicModel(args)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     optimizer.zero_grad()
+    parameter_summary = trainable_parameter_summary(model)
+    print(
+        f"trainable parameters: {parameter_summary['trainable']:,} "
+        f"of {parameter_summary['total_exposed']:,} exposed parameters",
+        flush=True,
+    )
     best_validation_pr_auc = -1.0
     best_epoch = None
     best_state = None
     best_validation_metrics = None
-    for epoch in range(1, args.epochs + 1):
+    best_threshold = None
+    start_epoch = 1
+    if args.resume_checkpoint is not None:
+        checkpoint = torch.load(args.resume_checkpoint, map_location="cpu")
+        restore_model_state(model, checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        best_validation_pr_auc = checkpoint["best_validation_pr_auc"]
+        best_epoch = checkpoint["best_epoch"]
+        best_state = checkpoint["best_state"]
+        best_validation_metrics = checkpoint["best_validation_metrics"]
+        best_threshold = checkpoint["best_threshold"]
+        start_epoch = int(checkpoint["epoch"]) + 1
+        print(f"Resuming after epoch {checkpoint['epoch']} from {args.resume_checkpoint}", flush=True)
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         rows = []
         for step, batch in enumerate(train_loader, start=1):
@@ -618,23 +819,59 @@ def main() -> None:
                 optimizer.step()
                 optimizer.zero_grad()
             rows.append(metrics)
+            if args.log_every and (step % args.log_every == 0 or step == len(train_loader)):
+                print(
+                    f"epoch={epoch} step={step}/{len(train_loader)} "
+                    f"loss={metrics['loss']:.4f} logic_loss={metrics['logic_loss']:.4f}",
+                    flush=True,
+                )
         train_metrics = summarize_epoch(rows)
-        validation_metrics = evaluate(model, validation_loader, args)
+        validation_metrics, validation_predictions = evaluate(model, validation_loader, args)
         print(
             f"epoch={epoch} train_loss={train_metrics['loss']:.4f} "
             f"train_logic_loss={train_metrics['logic_loss']:.4f} "
             f"val_loss={validation_metrics['loss']:.4f} "
-            f"val_pr_auc={validation_metrics['transition_pr_auc']:.4f}"
+            f"val_pr_auc={validation_metrics['transition_detector']['pr_auc']:.4f}"
         )
-        if validation_metrics["transition_pr_auc"] > best_validation_pr_auc:
-            best_validation_pr_auc = validation_metrics["transition_pr_auc"]
+        if validation_metrics["transition_detector"]["pr_auc"] > best_validation_pr_auc:
+            best_validation_pr_auc = validation_metrics["transition_detector"]["pr_auc"]
             best_epoch = epoch
             best_state = capture_model_state(model)
             best_validation_metrics = validation_metrics
+            best_threshold = validation_metrics["transition_detector"]["threshold"]
+            save_adapter_and_heads(
+                model,
+                args.output_dir,
+                {
+                    "status": "best_validation_checkpoint",
+                    "best_epoch": best_epoch,
+                    "best_validation": best_validation_metrics,
+                },
+            )
+            validation_predictions.to_parquet(
+                args.output_dir / "validation_predictions.parquet",
+                index=False,
+            )
+            write_json(args.output_dir / "best_validation_metrics.json", best_validation_metrics)
+            print(f"Saved improved checkpoint after epoch {epoch}.", flush=True)
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state": capture_model_state(model),
+                "optimizer_state": optimizer.state_dict(),
+                "best_validation_pr_auc": best_validation_pr_auc,
+                "best_epoch": best_epoch,
+                "best_state": best_state,
+                "best_validation_metrics": best_validation_metrics,
+                "best_threshold": best_threshold,
+            },
+            args.output_dir / "latest_training_checkpoint.pt",
+        )
+        print(f"Saved resumable checkpoint after epoch {epoch}.", flush=True)
     if best_state is None:
         raise RuntimeError("Training did not produce a best model checkpoint.")
     restore_model_state(model, best_state)
-    test_metrics = evaluate(model, test_loader, args)
+    test_metrics, test_predictions = evaluate(model, test_loader, args, best_threshold)
     metadata = {
         "model_id": args.model_id,
         "best_epoch": best_epoch,
@@ -643,6 +880,7 @@ def main() -> None:
         "tabular_columns": TABULAR_COLUMNS,
         "tabular_stats": stats,
         "predicate_names": PREDICATE_NAMES,
+        "parameter_summary": parameter_summary,
         "loss_weights": {
             "predicate": args.predicate_loss_weight,
             "logic": args.logic_loss_weight,
@@ -656,12 +894,15 @@ def main() -> None:
         ),
     }
     save_adapter_and_heads(model, args.output_dir, metadata)
-    (args.output_dir / "test_metrics.json").write_text(
-        json.dumps(test_metrics, indent=2),
-        encoding="utf-8",
-    )
+    test_predictions.to_parquet(args.output_dir / "test_predictions.parquet", index=False)
+    write_json(args.output_dir / "test_metrics.json", test_metrics)
     print(f"Best validation transition PR-AUC: {best_validation_pr_auc:.4f}")
-    print(f"Test transition PR-AUC: {test_metrics['transition_pr_auc']:.4f}")
+    print(f"Selected validation threshold: {best_threshold:.2f}")
+    print(f"Test transition PR-AUC: {test_metrics['transition_detector']['pr_auc']:.4f}")
+    print(
+        f"Test final accuracy: {test_metrics['final_regime']['accuracy']:.4f} "
+        f"macro-F1: {test_metrics['final_regime']['macro_f1']:.4f}"
+    )
     print(f"Saved QLoRA adapter and neuro-symbolic heads to {args.output_dir}")
 
 
