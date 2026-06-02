@@ -28,3 +28,4 @@ realtime data/
 .ipython/
 /data/
 /models/
+/outputs/
