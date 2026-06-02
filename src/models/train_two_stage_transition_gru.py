@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
 
 MODEL_DIR = Path(__file__).resolve().parent
 if str(MODEL_DIR) not in sys.path:
@@ -36,6 +38,19 @@ from train_latent_state_gru import (
     transform_features,
     validate_contextual_driver_inputs,
 )
+
+SELECTIVE_RULE_NAMES = [
+    "recent_release_and_material_news_imply_transition",
+    "ticker_relative_downside_surprise_implies_transition",
+    "ticker_relative_downside_surprise_implies_bear_destination",
+    "ticker_relative_upside_surprise_implies_transition",
+    "ticker_relative_upside_surprise_implies_bull_destination",
+    "persistent_risk_off_shocks_imply_transition",
+    "persistent_risk_off_shocks_imply_bear_destination",
+    "persistent_risk_on_shocks_imply_transition",
+    "persistent_risk_on_shocks_imply_bull_destination",
+]
+PERSISTENCE_WINDOWS = [3, 5, 10]
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +84,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--destination-loss-weight", type=float, default=1.0)
     parser.add_argument("--logic-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--learnable-selective-rules",
+        action="store_true",
+        help=(
+            "Learn auditable relative selective-rule weights, surprise thresholds, "
+            "release decay, and a mixture over 3-, 5-, and 10-day news windows."
+        ),
+    )
+    parser.add_argument(
+        "--selective-persistence-window",
+        choices=["auto", "3", "5", "10", "learned"],
+        default="auto",
+        help=(
+            "Qwen shock window for selective persistence rules. auto uses 3 days for fixed rules "
+            "and a learned 3-/5-/10-day mixture with --learnable-selective-rules."
+        ),
+    )
     parser.add_argument(
         "--logic-rule-set",
         choices=[
@@ -154,6 +186,56 @@ def fuzzy_implication_loss(antecedent, consequent):
     return (1.0 - truth.clamp(0.0, 1.0)).mean()
 
 
+class LearnableSelectiveRuleParameters(nn.Module):
+    """Small auditable parameter layer for selective fuzzy-rule calibration."""
+
+    def __init__(self):
+        super().__init__()
+        self.rule_weight_logits = nn.Parameter(torch.zeros(len(SELECTIVE_RULE_NAMES)))
+        self.revenue_surprise_threshold_logit = nn.Parameter(torch.tensor(-6.0))
+        self.margin_surprise_threshold_logit = nn.Parameter(torch.tensor(-6.0))
+        self.release_decay_log_rate = nn.Parameter(torch.tensor(0.0))
+        self.persistence_window_logits = nn.Parameter(torch.zeros(len(PERSISTENCE_WINDOWS)))
+
+    def relative_rule_weights(self, active_names: list[str] | None = None) -> dict[str, object]:
+        weights = torch.nn.functional.softplus(self.rule_weight_logits) + 1e-6
+        named_weights = dict(zip(SELECTIVE_RULE_NAMES, weights))
+        names = active_names or SELECTIVE_RULE_NAMES
+        active_mean = torch.stack([named_weights[name] for name in names]).mean()
+        return {name: value / active_mean for name, value in named_weights.items()}
+
+    def release_proximity(self, days_since_release):
+        decay_rate = torch.nn.functional.softplus(self.release_decay_log_rate) + 1e-6
+        return torch.exp(-decay_rate * days_since_release.clamp(min=0.0) / 10.0)
+
+    def surprise_thresholds(self):
+        return (
+            torch.nn.functional.softplus(self.revenue_surprise_threshold_logit),
+            torch.nn.functional.softplus(self.margin_surprise_threshold_logit),
+        )
+
+    def persistence_window_weights(self):
+        return self.persistence_window_logits.softmax(dim=0)
+
+    def audit_values(self) -> dict[str, object]:
+        revenue_threshold, margin_threshold = self.surprise_thresholds()
+        return {
+            "relative_rule_weights": {
+                name: float(value.detach().cpu())
+                for name, value in self.relative_rule_weights().items()
+            },
+            "revenue_surprise_threshold_z": float(revenue_threshold.detach().cpu()),
+            "margin_surprise_threshold_z": float(margin_threshold.detach().cpu()),
+            "release_decay_rate": float(
+                (torch.nn.functional.softplus(self.release_decay_log_rate) + 1e-6).detach().cpu()
+            ),
+            "persistence_window_weights": {
+                f"{window}d": float(value.detach().cpu())
+                for window, value in zip(PERSISTENCE_WINDOWS, self.persistence_window_weights())
+            },
+        }
+
+
 def final_raw_feature(raw, feature_columns: list[str], name: str):
     import torch
 
@@ -170,6 +252,8 @@ def transition_logic_losses(
     raw,
     feature_columns: list[str],
     rule_set: str,
+    selective_parameters: LearnableSelectiveRuleParameters | None = None,
+    selective_persistence_window: str = "auto",
 ) -> dict[str, object]:
     """Return named fuzzy-rule violations for the selected LTN-style rule set."""
     import torch
@@ -193,24 +277,49 @@ def transition_logic_losses(
     risk_on = final_raw_feature(raw, feature_columns, "driver_max_risk_on_shock").clamp(0.0, 1.0)
     risk_off = final_raw_feature(raw, feature_columns, "driver_max_risk_off_shock").clamp(0.0, 1.0)
     release_proximity = final_raw_feature(raw, feature_columns, "rule_release_proximity_10d").clamp(0.0, 1.0)
+    if selective_parameters is not None:
+        days_since_release = final_raw_feature(raw, feature_columns, "rule_days_since_fundamental_release")
+        release_active = (release_proximity > 0.0).to(dtype=raw.dtype)
+        release_proximity = (
+            selective_parameters.release_proximity(days_since_release) * release_active
+        ).clamp(0.0, 1.0)
     revenue_surprise = final_raw_feature(raw, feature_columns, "rule_revenue_yoy_ticker_z")
     margin_surprise = final_raw_feature(
         raw,
         feature_columns,
         "rule_operating_margin_yoy_change_ticker_z",
     )
-    persistent_risk_on = final_raw_feature(
-        raw,
-        feature_columns,
-        "rule_risk_on_shock_persistence_3d",
-    ).clamp(0.0, 1.0)
-    persistent_risk_off = final_raw_feature(
-        raw,
-        feature_columns,
-        "rule_risk_off_shock_persistence_3d",
-    ).clamp(0.0, 1.0)
-    mean_risk_on_3d = final_raw_feature(raw, feature_columns, "rule_risk_on_shock_mean_3d").clamp(0.0, 1.0)
-    mean_risk_off_3d = final_raw_feature(raw, feature_columns, "rule_risk_off_shock_mean_3d").clamp(0.0, 1.0)
+    resolved_persistence_window = selective_persistence_window
+    if resolved_persistence_window == "auto":
+        resolved_persistence_window = "learned" if selective_parameters is not None else "3"
+    if resolved_persistence_window == "learned":
+        if selective_parameters is None:
+            raise ValueError("The learned persistence window requires --learnable-selective-rules.")
+        window_weights = selective_parameters.persistence_window_weights()
+    else:
+        window_weights = raw.new_tensor(
+            [float(str(window) == resolved_persistence_window) for window in PERSISTENCE_WINDOWS]
+        )
+    persistent_risk_on = sum(
+        weight
+        * final_raw_feature(raw, feature_columns, f"rule_risk_on_shock_persistence_{window}d").clamp(0.0, 1.0)
+        for weight, window in zip(window_weights, PERSISTENCE_WINDOWS)
+    )
+    persistent_risk_off = sum(
+        weight
+        * final_raw_feature(raw, feature_columns, f"rule_risk_off_shock_persistence_{window}d").clamp(0.0, 1.0)
+        for weight, window in zip(window_weights, PERSISTENCE_WINDOWS)
+    )
+    mean_risk_on = sum(
+        weight
+        * final_raw_feature(raw, feature_columns, f"rule_risk_on_shock_mean_{window}d").clamp(0.0, 1.0)
+        for weight, window in zip(window_weights, PERSISTENCE_WINDOWS)
+    )
+    mean_risk_off = sum(
+        weight
+        * final_raw_feature(raw, feature_columns, f"rule_risk_off_shock_mean_{window}d").clamp(0.0, 1.0)
+        for weight, window in zip(window_weights, PERSISTENCE_WINDOWS)
+    )
 
     material_news = (
         confidence
@@ -277,16 +386,21 @@ def transition_logic_losses(
             fuzzy_implication_loss(release_material_news, transition)
         )
     if rule_set in {"selective_surprise", "selective_all"}:
+        revenue_threshold, margin_threshold = (
+            selective_parameters.surprise_thresholds()
+            if selective_parameters is not None
+            else (raw.new_tensor(0.0), raw.new_tensor(0.0))
+        )
         downside_surprise = (
-            torch.sigmoid(-2.0 * revenue_surprise)
-            * torch.sigmoid(-2.0 * margin_surprise)
+            torch.sigmoid(-2.0 * (revenue_surprise + revenue_threshold))
+            * torch.sigmoid(-2.0 * (margin_surprise + margin_threshold))
             * release_proximity
             * risk_off
             * confidence
         ).clamp(0.0, 1.0)
         upside_surprise = (
-            torch.sigmoid(2.0 * revenue_surprise)
-            * torch.sigmoid(2.0 * margin_surprise)
+            torch.sigmoid(2.0 * (revenue_surprise - revenue_threshold))
+            * torch.sigmoid(2.0 * (margin_surprise - margin_threshold))
             * release_proximity
             * risk_on
             * confidence
@@ -305,10 +419,10 @@ def transition_logic_losses(
         )
     if rule_set in {"selective_persistence", "selective_all"}:
         persistent_off = (
-            persistent_risk_off * mean_risk_off_3d * confidence * (1.0 - uncertainty)
+            persistent_risk_off * mean_risk_off * confidence * (1.0 - uncertainty)
         ).clamp(0.0, 1.0)
         persistent_on = (
-            persistent_risk_on * mean_risk_on_3d * confidence * (1.0 - uncertainty)
+            persistent_risk_on * mean_risk_on * confidence * (1.0 - uncertainty)
         ).clamp(0.0, 1.0)
         losses["persistent_risk_off_shocks_imply_transition"] = fuzzy_implication_loss(
             persistent_off,
@@ -327,10 +441,83 @@ def transition_logic_losses(
     return losses
 
 
-def mean_logic_loss(losses: dict[str, object], reference):
+def mean_logic_loss(
+    losses: dict[str, object],
+    reference,
+    selective_parameters: LearnableSelectiveRuleParameters | None = None,
+):
     if not losses:
         return reference.new_tensor(0.0)
-    return sum(losses.values()) / len(losses)
+    relative_weights = (
+        selective_parameters.relative_rule_weights(list(losses))
+        if selective_parameters is not None
+        else {}
+    )
+    weighted_losses = [
+        loss * relative_weights.get(name, reference.new_tensor(1.0))
+        for name, loss in losses.items()
+    ]
+    return sum(weighted_losses) / len(weighted_losses)
+
+
+def collect_rule_audit(
+    model,
+    dataset,
+    batch_size: int,
+    rule_set: str,
+    logic_weight: float,
+    selective_persistence_window: str,
+) -> dict[str, object]:
+    from torch.utils.data import DataLoader
+
+    if rule_set == "none":
+        return {"rules": {}}
+    totals: dict[str, float] = {}
+    rows = 0
+    model.eval()
+    with torch.no_grad():
+        for detector_x, destination_x, raw, _ in DataLoader(dataset, batch_size=batch_size, shuffle=False):
+            detector_x = detector_x.to(model.device, dtype=torch.float32)
+            destination_x = destination_x.to(model.device, dtype=torch.float32)
+            raw = raw.to(model.device, dtype=torch.float32)
+            transition_logits, destination_logits = model.logits(detector_x, destination_x)
+            rule_losses = transition_logic_losses(
+                transition_logits,
+                destination_logits,
+                raw,
+                dataset.feature_columns,
+                rule_set,
+                model.selective_rule_parameters,
+                selective_persistence_window,
+            )
+            batch_rows = len(raw)
+            rows += batch_rows
+            for name, loss in rule_losses.items():
+                totals[name] = totals.get(name, 0.0) + float(loss.cpu()) * batch_rows
+    relative_weights = (
+        model.selective_rule_parameters.relative_rule_weights(list(totals))
+        if model.selective_rule_parameters is not None
+        else {}
+    )
+    rules = {}
+    for name, total in totals.items():
+        violation = total / rows
+        relative_weight = float(relative_weights.get(name, torch.tensor(1.0)).detach().cpu())
+        rules[name] = {
+            "satisfaction": 1.0 - violation,
+            "violation": violation,
+            "relative_weight": relative_weight,
+            "weighted_loss_contribution": logic_weight * relative_weight * violation / len(totals),
+        }
+    return {
+        "rows": rows,
+        "rules": rules,
+        "learned_parameters": (
+            model.selective_rule_parameters.audit_values()
+            if model.selective_rule_parameters is not None
+            else None
+        ),
+    }
 
 
 class DualInputSequenceDataset:
@@ -389,6 +576,7 @@ class TwoStageTransitionGRU:
         num_layers: int,
         dropout: float,
         device: str | None,
+        learnable_selective_rules: bool,
     ):
         import torch
         import torch.nn as nn
@@ -420,6 +608,11 @@ class TwoStageTransitionGRU:
             nn.Dropout(dropout),
             nn.Linear(hidden_size, len(LABEL_NAMES)),
         ).to(self.device)
+        self.selective_rule_parameters = (
+            LearnableSelectiveRuleParameters().to(self.device)
+            if learnable_selective_rules
+            else None
+        )
 
     def logits(self, detector_x, destination_x):
         detector_hidden_sequence, _ = self.detector_encoder(detector_x)
@@ -433,18 +626,24 @@ class TwoStageTransitionGRU:
         yield from self.destination_encoder.parameters()
         yield from self.transition_head.parameters()
         yield from self.destination_head.parameters()
+        if self.selective_rule_parameters is not None:
+            yield from self.selective_rule_parameters.parameters()
 
     def train(self):
         self.detector_encoder.train()
         self.destination_encoder.train()
         self.transition_head.train()
         self.destination_head.train()
+        if self.selective_rule_parameters is not None:
+            self.selective_rule_parameters.train()
 
     def eval(self):
         self.detector_encoder.eval()
         self.destination_encoder.eval()
         self.transition_head.eval()
         self.destination_head.eval()
+        if self.selective_rule_parameters is not None:
+            self.selective_rule_parameters.eval()
 
 
 def mask_current_destination(destination_logits, current):
@@ -640,6 +839,10 @@ def print_report(name: str, report: dict) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.learnable_selective_rules and not args.logic_rule_set.startswith("selective_"):
+        raise ValueError("--learnable-selective-rules requires a selective_* --logic-rule-set.")
+    if args.selective_persistence_window == "learned" and not args.learnable_selective_rules:
+        raise ValueError("--selective-persistence-window learned requires --learnable-selective-rules.")
     random.seed(args.seed)
     np.random.seed(args.seed)
     import torch
@@ -652,6 +855,28 @@ def main() -> None:
     schema = read_schema(args.schema_path)
     daily = load_daily(args.daily_path)
     available_features = [column for column in schema["feature_columns"] if column in daily.columns]
+    if args.learnable_selective_rules or args.selective_persistence_window in {"5", "10"}:
+        required_windows = (
+            PERSISTENCE_WINDOWS
+            if args.learnable_selective_rules
+            else [int(args.selective_persistence_window)]
+        )
+        required_rule_features = {
+            "rule_days_since_fundamental_release",
+            "rule_release_proximity_10d",
+            *{
+                f"rule_{pressure}_shock_{statistic}_{window}d"
+                for pressure in ["risk_on", "risk_off"]
+                for statistic in ["mean", "persistence"]
+                for window in required_windows
+            },
+        }
+        missing_rule_features = sorted(required_rule_features.difference(available_features))
+        if missing_rule_features:
+            raise ValueError(
+                "Rebuild the selective LTN dataset before using --learnable-selective-rules. "
+                f"Missing rule features: {missing_rule_features}"
+            )
     if args.require_contextual_drivers:
         validate_contextual_driver_inputs(daily, available_features)
     detector_feature_set = args.detector_feature_set or args.feature_set
@@ -714,6 +939,7 @@ def main() -> None:
         num_layers=args.num_layers,
         dropout=args.dropout,
         device=args.device,
+        learnable_selective_rules=args.learnable_selective_rules,
     )
     transition_weight = 1.0
     if args.transition_pos_weight == "auto":
@@ -758,8 +984,10 @@ def main() -> None:
                 raw.to(model.device, dtype=torch.float32),
                 available_features,
                 args.logic_rule_set,
+                model.selective_rule_parameters,
+                args.selective_persistence_window,
             )
-            logic_loss = mean_logic_loss(rule_losses, transition_logits)
+            logic_loss = mean_logic_loss(rule_losses, transition_logits, model.selective_rule_parameters)
             loss = (
                 transition_loss
                 + args.destination_loss_weight * destination_loss
@@ -802,6 +1030,14 @@ def main() -> None:
             },
                 "transition_head": {k: v.detach().cpu().clone() for k, v in model.transition_head.state_dict().items()},
                 "destination_head": {k: v.detach().cpu().clone() for k, v in model.destination_head.state_dict().items()},
+                "selective_rule_parameters": (
+                    {
+                        k: v.detach().cpu().clone()
+                        for k, v in model.selective_rule_parameters.state_dict().items()
+                    }
+                    if model.selective_rule_parameters is not None
+                    else None
+                ),
                 "threshold": threshold,
                 "validation": validation_report,
                 "epoch": epoch,
@@ -818,13 +1054,35 @@ def main() -> None:
     model.destination_encoder.load_state_dict(best_state["destination_encoder"])
     model.transition_head.load_state_dict(best_state["transition_head"])
     model.destination_head.load_state_dict(best_state["destination_head"])
+    if model.selective_rule_parameters is not None:
+        model.selective_rule_parameters.load_state_dict(best_state["selective_rule_parameters"])
     torch.save(best_state, args.output_dir / "best_two_stage_transition_gru.pt")
 
     test_report = evaluate(model, test_set, args.batch_size, best_state["threshold"])
+    validation_rule_audit = collect_rule_audit(
+        model,
+        validation_set,
+        args.batch_size,
+        args.logic_rule_set,
+        args.logic_weight,
+        args.selective_persistence_window,
+    )
+    test_rule_audit = collect_rule_audit(
+        model,
+        test_set,
+        args.batch_size,
+        args.logic_rule_set,
+        args.logic_weight,
+        args.selective_persistence_window,
+    )
     print(f"selected_validation_threshold={best_state['threshold']:.2f}")
     print_report("validation", best_state["validation"])
     print_report("test", test_report)
     write_json(args.output_dir / "test_metrics.json", test_report)
+    write_json(
+        args.output_dir / "rule_audit.json",
+        {"validation": validation_rule_audit, "test": test_rule_audit},
+    )
     write_json(
         args.output_dir / "training_metadata.json",
         {
@@ -843,6 +1101,13 @@ def main() -> None:
             "destination_loss_weight": args.destination_loss_weight,
             "logic_weight": args.logic_weight,
             "logic_rule_set": args.logic_rule_set,
+            "learnable_selective_rules": args.learnable_selective_rules,
+            "selective_persistence_window": args.selective_persistence_window,
+            "learned_selective_rule_parameters": (
+                model.selective_rule_parameters.audit_values()
+                if model.selective_rule_parameters is not None
+                else None
+            ),
             "logic_rule_names": list(
                 transition_logic_losses(
                     torch.zeros(1, device=model.device),
@@ -850,6 +1115,8 @@ def main() -> None:
                     torch.zeros((1, 1, len(available_features)), device=model.device),
                     available_features,
                     args.logic_rule_set,
+                    model.selective_rule_parameters,
+                    args.selective_persistence_window,
                 )
             ),
             "selection_metric": args.selection_metric,

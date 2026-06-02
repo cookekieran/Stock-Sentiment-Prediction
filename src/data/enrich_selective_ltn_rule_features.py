@@ -19,11 +19,16 @@ RULE_FEATURE_COLUMNS = [
     "rule_release_proximity_10d",
     "rule_revenue_yoy_ticker_z",
     "rule_operating_margin_yoy_change_ticker_z",
-    "rule_risk_on_shock_mean_3d",
-    "rule_risk_off_shock_mean_3d",
-    "rule_risk_on_shock_persistence_3d",
-    "rule_risk_off_shock_persistence_3d",
 ]
+PERSISTENCE_WINDOWS = [3, 5, 10]
+for window in PERSISTENCE_WINDOWS:
+    for pressure in ["risk_on", "risk_off"]:
+        RULE_FEATURE_COLUMNS.extend(
+            [
+                f"rule_{pressure}_shock_mean_{window}d",
+                f"rule_{pressure}_shock_persistence_{window}d",
+            ]
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,16 +79,17 @@ def main() -> None:
             daily.loc[group.index, target] = release_relative_zscore(group, source)
 
     grouped = daily.groupby("ticker", group_keys=False)
-    for pressure in ["risk_on", "risk_off"]:
-        source = f"driver_max_{pressure}_shock"
-        mean_column = f"rule_{pressure}_shock_mean_3d"
-        persistence_column = f"rule_{pressure}_shock_persistence_3d"
-        daily[mean_column] = grouped[source].transform(
-            lambda values: values.rolling(3, min_periods=1).mean()
-        )
-        daily[persistence_column] = grouped[source].transform(
-            lambda values: values.gt(0.0).rolling(3, min_periods=1).mean()
-        )
+    for window in PERSISTENCE_WINDOWS:
+        for pressure in ["risk_on", "risk_off"]:
+            source = f"driver_max_{pressure}_shock"
+            mean_column = f"rule_{pressure}_shock_mean_{window}d"
+            persistence_column = f"rule_{pressure}_shock_persistence_{window}d"
+            daily[mean_column] = grouped[source].transform(
+                lambda values: values.rolling(window, min_periods=1).mean()
+            )
+            daily[persistence_column] = grouped[source].transform(
+                lambda values: values.gt(0.0).rolling(window, min_periods=1).mean()
+            )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     daily.to_parquet(args.output_dir / "latent_state_daily.parquet", index=False)
@@ -95,8 +101,8 @@ def main() -> None:
         "selective_ltn_rule_feature_columns": RULE_FEATURE_COLUMNS,
         "selective_ltn_rule_feature_leakage_control": (
             "Release proximity uses public availability dates; ticker-relative z-scores compare each "
-            "public quarterly release against prior public releases only; shock persistence uses trailing "
-            "rows including the current day."
+            "public quarterly release against prior public releases only; 3-, 5-, and 10-day shock "
+            "persistence features use trailing rows including the current day."
         ),
     }
     args.output_schema_path.parent.mkdir(parents=True, exist_ok=True)

@@ -495,13 +495,14 @@ python src\data\enrich_selective_ltn_rule_features.py `
 
 The selective rule families are:
 
-- `selective_release`: a public quarterly statement released within ten trading
+- `selective_release`: a public quarterly statement released within ten calendar
   days and material contextual news imply a transition;
 - `selective_surprise`: unusually positive or negative revenue and operating
   margin changes relative to the ticker's prior public quarterly statements,
   gated by matching Qwen pressure, imply a transition and destination;
-- `selective_persistence`: repeated risk-on or risk-off Qwen shocks over the
-  trailing three trading days imply a transition and matching destination;
+- `selective_persistence`: repeated risk-on or risk-off Qwen shocks over
+  trailing 3-, 5-, and 10-day windows imply a transition and matching
+  destination;
 - `selective_all`: combine all selective rule families.
 
 Release timing uses `fundamental_available_from_date`. Ticker-relative surprise
@@ -509,6 +510,33 @@ z-scores compare each public statement against prior public statements only.
 Qwen shock persistence uses trailing observations including the current day.
 The generated `rule_*` columns are excluded from the GRU feature sets and are
 used only by the fuzzy regularizer.
+
+To calibrate selective rules with gradient descent while keeping them
+auditable, add `--learnable-selective-rules`. This learns positive relative
+weights for each selective rule, revenue and operating-margin surprise
+thresholds, release-decay strength, and a mixture over the trailing 3-, 5-, and
+10-day Qwen shock windows. The global `--logic-weight` remains the overall
+regularization strength. Each run writes `rule_audit.json` with validation and
+test satisfaction, relative weights, weighted contributions, and learned
+parameters.
+
+For a controlled persistence-window ablation, set
+`--selective-persistence-window 3`, `5`, or `10`. The default `auto` preserves
+the fixed three-day behavior unless `--learnable-selective-rules` is enabled,
+in which case it learns a mixture over all three windows.
+
+```powershell
+python src\models\train_two_stage_transition_gru.py `
+  --daily-path data\processed\qwen_quality_filter_fundamentals_selective_ltn\horizon_20\latent_state_daily.parquet `
+  --schema-path data\processed\qwen_quality_filter_fundamentals_selective_ltn\horizon_20\latent_state_schema.json `
+  --feature-set price_qwen_fundamentals `
+  --selection-metric transition_pr_auc `
+  --logic-rule-set selective_all `
+  --logic-weight 0.5 `
+  --learnable-selective-rules `
+  --save-predictions `
+  --output-dir models\learnable_selective_ltn\horizon_20\selective_all_w05
+```
 
 ## 6. Train the old DeepSeek-only baseline
 
