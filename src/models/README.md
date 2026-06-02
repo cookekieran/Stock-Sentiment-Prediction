@@ -409,6 +409,28 @@ The fundamental inputs are stationary ratios and year-over-year changes. Raw
 financial levels, fiscal period ends, public release dates, forward returns,
 and target labels are not GRU inputs.
 
+### Filter low-quality Qwen packets for transition detection
+
+Qwen predicate packets can be neutralized before training when their aggregate
+confidence is low or uncertainty is high. This keeps the filtering rule
+auditable and does not alter price inputs or future regime targets. The saved
+`qwen_quality_filter_pass` column is diagnostic metadata only; it is not a GRU
+input.
+
+```powershell
+python src\data\build_filtered_qwen_transition_datasets.py `
+  --daily-path data\processed\horizon_5\daily\latent_state_daily.parquet `
+  --schema-path data\processed\horizon_5\daily\latent_state_schema.json `
+  --output-root data\processed\qwen_quality_filter_transition_ablation `
+  --horizons 5 10 20 45 `
+  --minimum-confidence 0.70 `
+  --maximum-uncertainty 0.30
+```
+
+For each horizon, compare `price_only` against `price_qwen` trained on the
+matched `raw` and `filtered` folders. Select thresholds using the validation
+split only.
+
 ## 6. Train the old DeepSeek-only baseline
 
 ```powershell
