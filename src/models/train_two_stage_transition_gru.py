@@ -68,6 +68,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--destination-loss-weight", type=float, default=1.0)
+    parser.add_argument("--logic-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--logic-rule-set",
+        choices=[
+            "none",
+            "news",
+            "fundamentals",
+            "all",
+            "selective_release",
+            "selective_surprise",
+            "selective_persistence",
+            "selective_all",
+        ],
+        default="none",
+        help="Apply auditable LTN-style fuzzy constraints to transition and destination probabilities.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        choices=["final_macro_f1", "transition_pr_auc"],
+        default="final_macro_f1",
+        help="Validation metric used to select the saved epoch.",
+    )
     parser.add_argument(
         "--transition-pos-weight",
         choices=["auto", "none"],
@@ -111,7 +133,8 @@ def transition_feature_columns(feature_columns: list[str], feature_set: str) -> 
     }
     fundamentals = {column for column in feature_columns if column.startswith("fundamental_")}
     macro = {column for column in feature_columns if column.startswith("macro_")}
-    qwen = set(feature_columns).difference(price_columns, fundamentals, macro)
+    rule_features = {column for column in feature_columns if column.startswith("rule_")}
+    qwen = set(feature_columns).difference(price_columns, fundamentals, macro, rule_features)
     requested = {
         "full": set(feature_columns),
         "price_only": price_columns,
@@ -124,6 +147,190 @@ def transition_feature_columns(feature_columns: list[str], feature_set: str) -> 
     if not selected:
         raise ValueError(f"No features selected for feature_set={feature_set}.")
     return selected
+
+
+def fuzzy_implication_loss(antecedent, consequent):
+    truth = 1.0 - antecedent + antecedent * consequent
+    return (1.0 - truth.clamp(0.0, 1.0)).mean()
+
+
+def final_raw_feature(raw, feature_columns: list[str], name: str):
+    import torch
+
+    try:
+        index = feature_columns.index(name)
+    except ValueError:
+        return torch.zeros(raw.shape[0], dtype=raw.dtype, device=raw.device)
+    return raw[:, -1, index]
+
+
+def transition_logic_losses(
+    transition_logits,
+    destination_logits,
+    raw,
+    feature_columns: list[str],
+    rule_set: str,
+) -> dict[str, object]:
+    """Return named fuzzy-rule violations for the selected LTN-style rule set."""
+    import torch
+
+    if rule_set == "none":
+        return {}
+    transition = transition_logits.sigmoid()
+    destination = destination_logits.softmax(dim=-1)
+    bear = destination[:, 0]
+    sideways = destination[:, 1]
+    bull = destination[:, 2]
+
+    confidence = final_raw_feature(raw, feature_columns, "driver_mean_confidence").clamp(0.0, 1.0)
+    uncertainty = final_raw_feature(raw, feature_columns, "driver_uncertainty").clamp(0.0, 1.0)
+    materiality = final_raw_feature(raw, feature_columns, "driver_mean_materiality").clamp(0.0, 1.0)
+    novelty = final_raw_feature(raw, feature_columns, "driver_mean_novelty").clamp(0.0, 1.0)
+    intensity = final_raw_feature(raw, feature_columns, "driver_mean_intensity").clamp(0.0, 1.0)
+    update_strength = final_raw_feature(raw, feature_columns, "driver_update_strength").clamp(0.0, 1.0)
+    ticker_scope = final_raw_feature(raw, feature_columns, "driver_ticker_scope_share").clamp(0.0, 1.0)
+    irrelevant_scope = final_raw_feature(raw, feature_columns, "driver_irrelevant_scope_share").clamp(0.0, 1.0)
+    risk_on = final_raw_feature(raw, feature_columns, "driver_max_risk_on_shock").clamp(0.0, 1.0)
+    risk_off = final_raw_feature(raw, feature_columns, "driver_max_risk_off_shock").clamp(0.0, 1.0)
+    release_proximity = final_raw_feature(raw, feature_columns, "rule_release_proximity_10d").clamp(0.0, 1.0)
+    revenue_surprise = final_raw_feature(raw, feature_columns, "rule_revenue_yoy_ticker_z")
+    margin_surprise = final_raw_feature(
+        raw,
+        feature_columns,
+        "rule_operating_margin_yoy_change_ticker_z",
+    )
+    persistent_risk_on = final_raw_feature(
+        raw,
+        feature_columns,
+        "rule_risk_on_shock_persistence_3d",
+    ).clamp(0.0, 1.0)
+    persistent_risk_off = final_raw_feature(
+        raw,
+        feature_columns,
+        "rule_risk_off_shock_persistence_3d",
+    ).clamp(0.0, 1.0)
+    mean_risk_on_3d = final_raw_feature(raw, feature_columns, "rule_risk_on_shock_mean_3d").clamp(0.0, 1.0)
+    mean_risk_off_3d = final_raw_feature(raw, feature_columns, "rule_risk_off_shock_mean_3d").clamp(0.0, 1.0)
+
+    material_news = (
+        confidence
+        * (1.0 - uncertainty)
+        * materiality
+        * novelty
+        * intensity
+        * (0.5 + 0.5 * ticker_scope)
+    ).clamp(0.0, 1.0)
+    weak_or_irrelevant_news = (
+        (1.0 - update_strength)
+        * (1.0 - materiality)
+        + irrelevant_scope
+    ).clamp(0.0, 1.0)
+    conflicting_news = (risk_on * risk_off).sqrt().clamp(0.0, 1.0)
+
+    losses: dict[str, object] = {}
+    if rule_set in {"news", "all"}:
+        losses["material_news_implies_transition"] = fuzzy_implication_loss(
+            material_news,
+            transition,
+        )
+        losses["weak_or_irrelevant_news_implies_persistence"] = fuzzy_implication_loss(
+            weak_or_irrelevant_news,
+            1.0 - transition,
+        )
+        losses["conflicting_news_implies_sideways_destination"] = fuzzy_implication_loss(
+            conflicting_news * transition,
+            sideways,
+        )
+
+    if rule_set in {"fundamentals", "all"}:
+        revenue_yoy = final_raw_feature(raw, feature_columns, "fundamental_revenue_yoy")
+        operating_margin_yoy = final_raw_feature(
+            raw,
+            feature_columns,
+            "fundamental_operating_margin_yoy_change",
+        )
+        deteriorating_fundamentals = (
+            torch.sigmoid(-5.0 * revenue_yoy)
+            * torch.sigmoid(-15.0 * operating_margin_yoy)
+        ).clamp(0.0, 1.0)
+        improving_fundamentals = (
+            torch.sigmoid(5.0 * revenue_yoy)
+            * torch.sigmoid(15.0 * operating_margin_yoy)
+        ).clamp(0.0, 1.0)
+        aligned_risk_off = (deteriorating_fundamentals * risk_off * confidence).clamp(0.0, 1.0)
+        aligned_risk_on = (improving_fundamentals * risk_on * confidence).clamp(0.0, 1.0)
+        losses["deteriorating_fundamentals_and_risk_off_imply_transition"] = (
+            fuzzy_implication_loss(aligned_risk_off, transition)
+        )
+        losses["deteriorating_fundamentals_and_risk_off_imply_bear_destination"] = (
+            fuzzy_implication_loss(aligned_risk_off * transition, bear)
+        )
+        losses["improving_fundamentals_and_risk_on_imply_transition"] = (
+            fuzzy_implication_loss(aligned_risk_on, transition)
+        )
+        losses["improving_fundamentals_and_risk_on_imply_bull_destination"] = (
+            fuzzy_implication_loss(aligned_risk_on * transition, bull)
+        )
+    if rule_set in {"selective_release", "selective_all"}:
+        release_material_news = (release_proximity * material_news).clamp(0.0, 1.0)
+        losses["recent_release_and_material_news_imply_transition"] = (
+            fuzzy_implication_loss(release_material_news, transition)
+        )
+    if rule_set in {"selective_surprise", "selective_all"}:
+        downside_surprise = (
+            torch.sigmoid(-2.0 * revenue_surprise)
+            * torch.sigmoid(-2.0 * margin_surprise)
+            * release_proximity
+            * risk_off
+            * confidence
+        ).clamp(0.0, 1.0)
+        upside_surprise = (
+            torch.sigmoid(2.0 * revenue_surprise)
+            * torch.sigmoid(2.0 * margin_surprise)
+            * release_proximity
+            * risk_on
+            * confidence
+        ).clamp(0.0, 1.0)
+        losses["ticker_relative_downside_surprise_implies_transition"] = (
+            fuzzy_implication_loss(downside_surprise, transition)
+        )
+        losses["ticker_relative_downside_surprise_implies_bear_destination"] = (
+            fuzzy_implication_loss(downside_surprise * transition, bear)
+        )
+        losses["ticker_relative_upside_surprise_implies_transition"] = (
+            fuzzy_implication_loss(upside_surprise, transition)
+        )
+        losses["ticker_relative_upside_surprise_implies_bull_destination"] = (
+            fuzzy_implication_loss(upside_surprise * transition, bull)
+        )
+    if rule_set in {"selective_persistence", "selective_all"}:
+        persistent_off = (
+            persistent_risk_off * mean_risk_off_3d * confidence * (1.0 - uncertainty)
+        ).clamp(0.0, 1.0)
+        persistent_on = (
+            persistent_risk_on * mean_risk_on_3d * confidence * (1.0 - uncertainty)
+        ).clamp(0.0, 1.0)
+        losses["persistent_risk_off_shocks_imply_transition"] = fuzzy_implication_loss(
+            persistent_off,
+            transition,
+        )
+        losses["persistent_risk_off_shocks_imply_bear_destination"] = (
+            fuzzy_implication_loss(persistent_off * transition, bear)
+        )
+        losses["persistent_risk_on_shocks_imply_transition"] = fuzzy_implication_loss(
+            persistent_on,
+            transition,
+        )
+        losses["persistent_risk_on_shocks_imply_bull_destination"] = (
+            fuzzy_implication_loss(persistent_on * transition, bull)
+        )
+    return losses
+
+
+def mean_logic_loss(losses: dict[str, object], reference):
+    if not losses:
+        return reference.new_tensor(0.0)
+    return sum(losses.values()) / len(losses)
 
 
 class DualInputSequenceDataset:
@@ -522,13 +729,14 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     best_state = None
-    best_final_macro_f1 = -1.0
+    best_selection_score = -1.0
     epochs_without_improvement = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         losses = []
         transition_losses = []
         destination_losses = []
+        logic_losses = []
         for detector_x, destination_x, raw, y in loader:
             detector_x = detector_x.to(model.device, dtype=torch.float32)
             destination_x = destination_x.to(model.device, dtype=torch.float32)
@@ -544,12 +752,25 @@ def main() -> None:
                 destination_loss = destination_criterion(destination_logits[transition_mask], y[transition_mask])
             else:
                 destination_loss = destination_logits.sum() * 0.0
-            loss = transition_loss + args.destination_loss_weight * destination_loss
+            rule_losses = transition_logic_losses(
+                transition_logits,
+                destination_logits,
+                raw.to(model.device, dtype=torch.float32),
+                available_features,
+                args.logic_rule_set,
+            )
+            logic_loss = mean_logic_loss(rule_losses, transition_logits)
+            loss = (
+                transition_loss
+                + args.destination_loss_weight * destination_loss
+                + args.logic_weight * logic_loss
+            )
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
             transition_losses.append(float(transition_loss.detach().cpu()))
             destination_losses.append(float(destination_loss.detach().cpu()))
+            logic_losses.append(float(logic_loss.detach().cpu()))
 
         validation_arrays = collect_arrays(model, validation_set, args.batch_size)
         threshold, detector_report = tune_threshold(
@@ -559,14 +780,18 @@ def main() -> None:
         validation_report = evaluate(model, validation_set, args.batch_size, threshold)
         print(
             f"epoch={epoch} loss={np.mean(losses):.4f} transition_loss={np.mean(transition_losses):.4f} "
-            f"destination_loss={np.mean(destination_losses):.4f} threshold={threshold:.2f} "
+            f"destination_loss={np.mean(destination_losses):.4f} logic_loss={np.mean(logic_losses):.4f} "
+            f"threshold={threshold:.2f} "
             f"val_transition_f1={detector_report['f1']:.4f} val_pr_auc={detector_report['pr_auc']:.4f} "
             f"val_final_accuracy={validation_report['final_regime']['accuracy']:.4f} "
             f"val_final_macro_f1={validation_report['final_regime']['macro_f1']:.4f}"
         )
-        validation_final_macro_f1 = validation_report["final_regime"]["macro_f1"]
-        if validation_final_macro_f1 > best_final_macro_f1:
-            best_final_macro_f1 = validation_final_macro_f1
+        selection_score = {
+            "final_macro_f1": validation_report["final_regime"]["macro_f1"],
+            "transition_pr_auc": detector_report["pr_auc"],
+        }[args.selection_metric]
+        if selection_score > best_selection_score:
+            best_selection_score = selection_score
             epochs_without_improvement = 0
             best_state = {
             "detector_encoder": {
@@ -616,6 +841,18 @@ def main() -> None:
             "minimum_stable_accuracy": args.minimum_stable_accuracy,
             "seed": args.seed,
             "destination_loss_weight": args.destination_loss_weight,
+            "logic_weight": args.logic_weight,
+            "logic_rule_set": args.logic_rule_set,
+            "logic_rule_names": list(
+                transition_logic_losses(
+                    torch.zeros(1, device=model.device),
+                    torch.zeros((1, len(LABEL_NAMES)), device=model.device),
+                    torch.zeros((1, 1, len(available_features)), device=model.device),
+                    available_features,
+                    args.logic_rule_set,
+                )
+            ),
+            "selection_metric": args.selection_metric,
             "transition_pos_weight": args.transition_pos_weight,
             "resolved_transition_pos_weight": transition_weight,
             "best_epoch": best_state["epoch"],

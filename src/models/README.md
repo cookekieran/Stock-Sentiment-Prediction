@@ -447,6 +447,69 @@ foreach ($horizon in @(5, 10, 20, 45)) {
 Use `--feature-set price_qwen_fundamentals` to train the combined transition
 model. Use `--feature-set price_fundamentals` as the matched control.
 
+### Add LTN-style transition rules
+
+The two-stage transition trainer supports differentiable fuzzy implications:
+
+```text
+loss = transition_loss + destination_loss + logic_weight * logic_loss
+```
+
+Use `--logic-rule-set news`, `--logic-rule-set fundamentals`, or
+`--logic-rule-set all`. The implemented rules are:
+
+- material, novel, confident, low-uncertainty news implies a transition;
+- weak or irrelevant news implies persistence;
+- conflicting risk-on and risk-off news implies a sideways destination;
+- deteriorating revenue and operating margin with risk-off news implies a
+  transition and bearish destination;
+- improving revenue and operating margin with risk-on news implies a
+  transition and bullish destination.
+
+For PR-AUC-focused experiments, save epochs using validation transition PR-AUC:
+
+```powershell
+python src\models\train_two_stage_transition_gru.py `
+  --daily-path data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_20\latent_state_daily.parquet `
+  --schema-path data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_20\latent_state_schema.json `
+  --feature-set price_qwen_fundamentals `
+  --selection-metric transition_pr_auc `
+  --logic-rule-set all `
+  --logic-weight 0.1 `
+  --save-predictions `
+  --output-dir models\qwen_quality_filter_fundamentals_transition_ltn_ablation\horizon_20\all_w01_pr_auc
+```
+
+### Add selective LTN-style transition rules
+
+Use `enrich_selective_ltn_rule_features.py` to create auditable rule predicates
+without adding them to the GRU input vector:
+
+```powershell
+python src\data\enrich_selective_ltn_rule_features.py `
+  --daily-path data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_20\latent_state_daily.parquet `
+  --schema-path data\processed\qwen_quality_filter_fundamentals_transition_ablation\horizon_20\latent_state_schema.json `
+  --output-dir data\processed\qwen_quality_filter_fundamentals_selective_ltn\horizon_20 `
+  --output-schema-path data\processed\qwen_quality_filter_fundamentals_selective_ltn\horizon_20\latent_state_schema.json
+```
+
+The selective rule families are:
+
+- `selective_release`: a public quarterly statement released within ten trading
+  days and material contextual news imply a transition;
+- `selective_surprise`: unusually positive or negative revenue and operating
+  margin changes relative to the ticker's prior public quarterly statements,
+  gated by matching Qwen pressure, imply a transition and destination;
+- `selective_persistence`: repeated risk-on or risk-off Qwen shocks over the
+  trailing three trading days imply a transition and matching destination;
+- `selective_all`: combine all selective rule families.
+
+Release timing uses `fundamental_available_from_date`. Ticker-relative surprise
+z-scores compare each public statement against prior public statements only.
+Qwen shock persistence uses trailing observations including the current day.
+The generated `rule_*` columns are excluded from the GRU feature sets and are
+used only by the fuzzy regularizer.
+
 ## 6. Train the old DeepSeek-only baseline
 
 ```powershell
