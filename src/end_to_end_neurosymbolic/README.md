@@ -189,3 +189,25 @@ python src/end_to_end_neurosymbolic/train_qwen_qlora_gru_ltn.py \
 2. Compare ablations with the LTN and predicate-supervision losses disabled.
 3. Extend the quantified knowledge base with earnings-event predicates and
    trailing semantic persistence after the initial integrated run is stable.
+
+## 4. Mine Candidate LTN Rules
+
+Use `mine_candidate_ltn_rules.py` to discover candidate fuzzy implications from
+the train split and score them on validation only. The output CSV includes an
+`approved` column for human economic review before any rule is added back to the
+LTN knowledge base.
+
+```bash
+python src/end_to_end_neurosymbolic/mine_candidate_ltn_rules.py \
+  --daily-packets-path data/processed/end_to_end_neurosymbolic/horizon_20/daily_packets.parquet \
+  --output-dir outputs/end_to_end_neurosymbolic/rule_mining_horizon_20 \
+  --max-antecedents 3 \
+  --min-train-support 0.03 \
+  --min-validation-support 0.03 \
+  --min-validation-lift 1.05 \
+  --bootstrap-repeats 500 \
+  --top-k 300
+```
+
+Review `candidate_ltn_rules.csv` in the morning. Approve only rules that are
+economically plausible and were not selected using the test split.
