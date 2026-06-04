@@ -33,6 +33,15 @@ Use this template when recording Qwen QLoRA + GRU + LTN runs.
 - Test transition accuracy:
 - Test stable accuracy:
 
+## Saved Artifacts
+
+- QLoRA adapter copied:
+- Neuro-symbolic heads copied:
+- Test metrics copied:
+- Validation predictions copied:
+- Test predictions copied:
+- Resumable checkpoint copied:
+
 ## Notes
 
 - What improved:
