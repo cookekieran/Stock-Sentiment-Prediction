@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 from dataclasses import dataclass
@@ -72,6 +73,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--predicate-loss-weight", type=float, default=0.5)
     parser.add_argument("--logic-loss-weight", type=float, default=0.2)
+    parser.add_argument(
+        "--logic-rule-set",
+        choices=["original", "mined_keep"],
+        default="original",
+        help="Use the original hand-written formulas or mined rules marked KEEP in --approved-rules-path.",
+    )
+    parser.add_argument(
+        "--approved-rules-path",
+        type=Path,
+        default=None,
+        help="Reviewed candidate_ltn_rules CSV containing recommended_decision=KEEP rows.",
+    )
     parser.add_argument("--destination-loss-weight", type=float, default=1.0)
     parser.add_argument("--reaction-loss-weight", type=float, default=0.2)
     parser.add_argument("--lora-rank", type=int, default=16)
@@ -138,6 +151,10 @@ class PacketSequenceDataset:
 
         self.df = df.sort_values(["ticker", "anchor_trading_date"]).reset_index(drop=True)
         self.packet_texts = self.df["packet_text"].fillna("").astype(str).tolist()
+        self.raw_tabular = torch.tensor(
+            self.df[TABULAR_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(np.float32),
+            dtype=torch.float32,
+        )
         self.tabular = torch.tensor(transform_tabular(self.df, stats), dtype=torch.float32)
         self.predicates = torch.tensor(
             self.df[WEAK_LABEL_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(np.float32),
@@ -191,6 +208,7 @@ class PacketSequenceDataset:
         start, end = self.indices[idx]
         return {
             "packet_texts": self.packet_texts[start:end],
+            "raw_tabular": self.raw_tabular[start:end],
             "tabular": self.tabular[start:end],
             "weak_predicates": self.predicates[start:end],
             "current": self.current[end - 1],
@@ -205,6 +223,7 @@ def collate_sequences(batch: list[dict[str, object]]) -> dict[str, object]:
 
     return {
         "packet_texts": [text for item in batch for text in item["packet_texts"]],
+        "raw_tabular": torch.stack([item["raw_tabular"] for item in batch]),
         "tabular": torch.stack([item["tabular"] for item in batch]),
         "weak_predicates": torch.stack([item["weak_predicates"] for item in batch]),
         "current": torch.stack([item["current"] for item in batch]),
@@ -424,10 +443,108 @@ def grounded_ltn_formulas(outputs: ModelOutputs, batch: dict[str, object]) -> di
     }
 
 
+def load_keep_rule_specs(path: Path | None) -> list[dict[str, str]]:
+    if path is None:
+        raise ValueError("--logic-rule-set mined_keep requires --approved-rules-path.")
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    keep = [
+        row
+        for row in rows
+        if row.get("recommended_decision", "").strip().upper() == "KEEP"
+        or row.get("approved", "").strip().upper() in {"KEEP", "Y", "YES", "TRUE", "1"}
+    ]
+    if not keep:
+        raise ValueError(f"No KEEP rules found in {path}.")
+    return keep
+
+
+def final_raw_feature(batch: dict[str, object], column: str):
+    return batch["raw_tabular"][:, -1, TABULAR_COLUMNS.index(column)]
+
+
+def grounded_mined_keep_formulas(
+    outputs: ModelOutputs,
+    batch: dict[str, object],
+    rule_specs: list[dict[str, str]],
+) -> dict[str, object]:
+    import torch
+
+    logic = RealLogic()
+    device = outputs.transition_logits.device
+    predicates = outputs.predicates[:, -1]
+    relevance, materiality, risk_on, risk_off, uncertainty = predicates.unbind(dim=-1)
+    transition = outputs.transition_logits.sigmoid()
+    destination = outputs.destination_logits.softmax(dim=-1)
+    bear, sideways, bull = destination.unbind(dim=-1)
+    current = batch["current"].to(device)
+
+    recent_return = final_raw_feature(batch, "recent_return").to(device)
+    recent_drawdown = final_raw_feature(batch, "drawdown_from_recent_high").to(device)
+    volatility = final_raw_feature(batch, "realized_volatility_20d").to(device)
+    revenue_yoy = final_raw_feature(batch, "fundamental_revenue_yoy").to(device)
+    margin_change = final_raw_feature(batch, "fundamental_operating_margin_yoy_change").to(device)
+    quarter_age = final_raw_feature(batch, "fundamental_quarter_age_days").to(device)
+    has_statement = final_raw_feature(batch, "fundamental_has_public_statement").to(device).clamp(0.0, 1.0)
+
+    # These atoms mirror mine_candidate_ltn_rules.py, but keep them differentiable
+    # where they depend on model predicates or continuous financial features.
+    volatility_centered = (volatility - volatility.mean()) / volatility.std(unbiased=False).clamp(min=1e-6)
+    atoms = {
+        "high_ticker_relevance": relevance,
+        "material_news": materiality,
+        "risk_on_news": risk_on,
+        "risk_off_news": risk_off,
+        "high_uncertainty": uncertainty,
+        "recent_public_earnings_release": (torch.exp(-quarter_age.clamp(min=0.0) / 10.0) * has_statement).clamp(0.0, 1.0),
+        "negative_revenue_growth": torch.sigmoid(-revenue_yoy * 5.0),
+        "positive_revenue_growth": torch.sigmoid(revenue_yoy * 5.0),
+        "margin_deterioration": torch.sigmoid(-margin_change * 10.0),
+        "margin_improvement": torch.sigmoid(margin_change * 10.0),
+        "volatility_spike": torch.sigmoid(volatility_centered),
+        "drawdown_stress": (-recent_drawdown * 5.0).clamp(0.0, 1.0),
+        "positive_price_momentum": (recent_return * 10.0).clamp(0.0, 1.0),
+        "negative_price_momentum": (-recent_return * 10.0).clamp(0.0, 1.0),
+        "current_bear_regime": (current == 0).float(),
+        "current_sideways_regime": (current == 1).float(),
+        "current_bull_regime": (current == 2).float(),
+    }
+    consequents = {
+        "transition": transition,
+        "persistence": logic.not_(transition),
+        "bear_destination": bear,
+        "sideways_destination": sideways,
+        "bull_destination": bull,
+        "bear_transition": logic.and_(transition, bear),
+        "sideways_transition": logic.and_(transition, sideways),
+        "bull_transition": logic.and_(transition, bull),
+    }
+
+    satisfactions = {}
+    for index, row in enumerate(rule_specs, start=1):
+        antecedent_names = [part.strip() for part in row["antecedents"].split("&") if part.strip()]
+        consequent_name = row["consequent"].strip()
+        unknown_atoms = sorted(set(antecedent_names).difference(atoms))
+        if unknown_atoms:
+            raise ValueError(f"Rule {row['rule_text']} uses unknown atoms: {unknown_atoms}")
+        if consequent_name not in consequents:
+            raise ValueError(f"Rule {row['rule_text']} uses unknown consequent: {consequent_name}")
+
+        antecedent = atoms[antecedent_names[0]]
+        for name in antecedent_names[1:]:
+            antecedent = logic.and_(antecedent, atoms[name])
+        safe_name = row["rule_text"].replace(" ", "_").replace("=>", "implies").replace("&", "and")
+        satisfactions[f"mined_keep_{index:02d}_{safe_name}"] = logic.forall(
+            logic.implies(antecedent, consequents[consequent_name])
+        )
+    return satisfactions
+
+
 def compute_losses(
     outputs: ModelOutputs,
     batch: dict[str, object],
     args: argparse.Namespace,
+    rule_specs: list[dict[str, str]] | None,
 ) -> tuple[object, dict[str, float], dict[str, object]]:
     import torch
     import torch.nn.functional as functional
@@ -450,7 +567,10 @@ def compute_losses(
     predicate_loss = functional.binary_cross_entropy(outputs.predicates, weak_predicates)
     reaction_target = (future.float() - current.float()) / 2.0
     reaction_loss = functional.mse_loss(torch.tanh(outputs.reaction), reaction_target)
-    satisfactions = grounded_ltn_formulas(outputs, batch)
+    if args.logic_rule_set == "mined_keep":
+        satisfactions = grounded_mined_keep_formulas(outputs, batch, rule_specs or [])
+    else:
+        satisfactions = grounded_ltn_formulas(outputs, batch)
     logic_loss = 1.0 - torch.stack(list(satisfactions.values())).mean()
     loss = (
         transition_loss
@@ -560,7 +680,13 @@ def tune_threshold(arrays: dict[str, np.ndarray], minimum_stable_accuracy: float
     return float(max(eligible, key=lambda report: (report["macro_f1"], report["f1"], report["precision"]))["threshold"])
 
 
-def evaluate(model, loader, args: argparse.Namespace, threshold: float | None = None) -> tuple[dict[str, object], pd.DataFrame]:
+def evaluate(
+    model,
+    loader,
+    args: argparse.Namespace,
+    rule_specs: list[dict[str, str]] | None,
+    threshold: float | None = None,
+) -> tuple[dict[str, object], pd.DataFrame]:
     import torch
 
     model.eval()
@@ -571,7 +697,7 @@ def evaluate(model, loader, args: argparse.Namespace, threshold: float | None = 
         for batch in loader:
             batch["tabular"] = batch["tabular"].to(model.device)
             outputs = model.forward(batch, args.max_length)
-            _, batch_metrics, satisfactions = compute_losses(outputs, batch, args)
+            _, batch_metrics, satisfactions = compute_losses(outputs, batch, args, rule_specs)
             metrics.append(batch_metrics)
             probabilities = outputs.transition_logits.sigmoid().cpu().numpy()
             destination_logits = outputs.destination_logits.clone()
@@ -731,9 +857,12 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     packets, stats = validate_dataset(args.daily_packets_path)
+    rule_specs = load_keep_rule_specs(args.approved_rules_path) if args.logic_rule_set == "mined_keep" else None
     print(f"packet rows: {len(packets):,}")
     print(f"tabular features: {len(TABULAR_COLUMNS)}")
     print(f"semantic predicates: {', '.join(PREDICATE_NAMES)}")
+    if rule_specs is not None:
+        print(f"LTN rule set: mined_keep ({len(rule_specs)} rules)")
     if args.dry_run:
         print("Dry run passed: dataset schema is valid. Qwen was not loaded.")
         return
@@ -813,7 +942,7 @@ def main() -> None:
         for step, batch in enumerate(train_loader, start=1):
             batch["tabular"] = batch["tabular"].to(model.device)
             outputs = model.forward(batch, args.max_length)
-            loss, metrics, _ = compute_losses(outputs, batch, args)
+            loss, metrics, _ = compute_losses(outputs, batch, args, rule_specs)
             (loss / args.gradient_accumulation_steps).backward()
             if step % args.gradient_accumulation_steps == 0 or step == len(train_loader):
                 optimizer.step()
@@ -826,7 +955,7 @@ def main() -> None:
                     flush=True,
                 )
         train_metrics = summarize_epoch(rows)
-        validation_metrics, validation_predictions = evaluate(model, validation_loader, args)
+        validation_metrics, validation_predictions = evaluate(model, validation_loader, args, rule_specs)
         print(
             f"epoch={epoch} train_loss={train_metrics['loss']:.4f} "
             f"train_logic_loss={train_metrics['logic_loss']:.4f} "
@@ -871,7 +1000,7 @@ def main() -> None:
     if best_state is None:
         raise RuntimeError("Training did not produce a best model checkpoint.")
     restore_model_state(model, best_state)
-    test_metrics, test_predictions = evaluate(model, test_loader, args, best_threshold)
+    test_metrics, test_predictions = evaluate(model, test_loader, args, rule_specs, best_threshold)
     metadata = {
         "model_id": args.model_id,
         "best_epoch": best_epoch,
@@ -887,6 +1016,9 @@ def main() -> None:
             "destination": args.destination_loss_weight,
             "reaction": args.reaction_loss_weight,
         },
+        "logic_rule_set": args.logic_rule_set,
+        "approved_rules_path": str(args.approved_rules_path) if args.approved_rules_path else None,
+        "approved_rule_count": len(rule_specs or []),
         "architecture": (
             "Live Qwen QLoRA packet encoder with differentiable predicate heads, "
             "ticker-sequence GRU, transition and destination heads, reaction auxiliary "
