@@ -211,3 +211,24 @@ python src/end_to_end_neurosymbolic/mine_candidate_ltn_rules.py \
 
 Review `candidate_ltn_rules.csv` in the morning. Approve only rules that are
 economically plausible and were not selected using the test split.
+
+## 5. Compare Approved Rules Against No LTN
+
+Use the sampled runner for a quick diagnostic before committing GPU time to a
+full ablation:
+
+```bash
+bash src/end_to_end_neurosymbolic/run_keep_ltn_vs_no_ltn_sample.sh
+```
+
+This runs the same Qwen QLoRA and GRU architecture twice on identical
+stratified samples:
+
+- `no_ltn`: approved rules are audited, but their loss weight is zero;
+- `keep_ltn`: only rules marked `KEEP` contribute to the differentiable logic
+  loss.
+
+The runner writes `ltn_ablation_summary.csv` under
+`models/end_to_end_neurosymbolic/keep_rule_ltn_ablation_sample`. Compare
+transition PR-AUC, transition F1, final macro-F1, and stable accuracy before
+deciding whether the approved rules justify a full-data run.
