@@ -58,7 +58,20 @@ def parse_args() -> argparse.Namespace:
         "--market-close-hour",
         type=int,
         default=16,
-        help="Hour after which news is assigned to the next trading session.",
+        help="Local market hour after which news is assigned to the next trading session.",
+    )
+    parser.add_argument(
+        "--source-timezone",
+        default="America/New_York",
+        help=(
+            "Timezone assumed for timezone-naive time_published values. The existing "
+            "Alpha Vantage artifacts are treated as America/New_York local time."
+        ),
+    )
+    parser.add_argument(
+        "--market-timezone",
+        default="America/New_York",
+        help="Timezone used to apply the close-of-day information cutoff.",
     )
     parser.add_argument(
         "--positive-return-threshold",
@@ -377,10 +390,25 @@ def build_article_ticker_table(articles: pd.DataFrame, tickers: pd.DataFrame) ->
     return merged.dropna(subset=["time_published", "ticker", "article_text"])
 
 
-def add_signal_dates(examples: pd.DataFrame, market_close_hour: int) -> pd.DataFrame:
+def add_signal_dates(
+    examples: pd.DataFrame,
+    market_close_hour: int,
+    source_timezone: str,
+    market_timezone: str,
+) -> pd.DataFrame:
     examples = examples.copy()
-    after_close = examples["time_published"].dt.hour >= market_close_hour
-    examples["signal_date"] = examples["time_published"].dt.normalize()
+    published = pd.to_datetime(examples["time_published"], errors="coerce")
+    if published.dt.tz is None:
+        published = published.dt.tz_localize(
+            source_timezone,
+            ambiguous="NaT",
+            nonexistent="shift_forward",
+        )
+    market_published = published.dt.tz_convert(market_timezone)
+    examples["time_published_utc"] = published.dt.tz_convert("UTC")
+    examples["time_published_market"] = market_published
+    after_close = market_published.dt.hour >= market_close_hour
+    examples["signal_date"] = market_published.dt.tz_localize(None).dt.normalize()
     examples.loc[after_close, "signal_date"] += pd.Timedelta(days=1)
     return examples
 
@@ -622,7 +650,12 @@ def main() -> None:
     examples = examples[examples["ticker"].isin(selected_tickers)].copy()
     prices = prices[prices["ticker"].isin(selected_tickers)].copy()
 
-    examples = add_signal_dates(examples, args.market_close_hour)
+    examples = add_signal_dates(
+        examples,
+        args.market_close_hour,
+        args.source_timezone,
+        args.market_timezone,
+    )
     examples = attach_anchor_trading_dates(examples, prices)
     examples = add_market_labels(
         examples=examples,
