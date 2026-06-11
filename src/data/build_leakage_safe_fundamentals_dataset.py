@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-schema-path", type=Path, required=True)
-    parser.add_argument("--output-stem", default="material_event")
+    parser.add_argument("--output-stem", default="daily_context")
     parser.add_argument("--release-delay-days", type=int, default=1)
     parser.add_argument("--fallback-reporting-lag-days", type=int, default=45)
     return parser.parse_args()

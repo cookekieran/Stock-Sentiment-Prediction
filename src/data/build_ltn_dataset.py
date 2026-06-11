@@ -1,5 +1,5 @@
 """
-Build the article-ticker-price dataset used by the DeepSeek + LTN pipeline.
+Build the article-ticker-price dataset used by the neuro-symbolic pipeline.
 
 The output rows are supervised examples with:
 - article text and Alpha Vantage metadata

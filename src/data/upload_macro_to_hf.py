@@ -39,7 +39,7 @@ tags:
 # FRED Macroeconomic Features for Mag7 News Trend Modelling
 
 This dataset contains broad U.S. macroeconomic indicators fetched from FRED for
-use in a DeepSeek + Logic Tensor Network financial trend modelling project.
+use in a neuro-symbolic financial trend modelling project.
 
 The model-ready file is `macro_monthly.parquet`. It contains monthly macro
 features and derived regime indicators intended to be joined to article-level

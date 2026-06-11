@@ -1,4 +1,4 @@
-"""Schema contract for the DeepSeek + LTN training dataset."""
+"""Schema contract for the LTN training dataset."""
 
 from __future__ import annotations
 

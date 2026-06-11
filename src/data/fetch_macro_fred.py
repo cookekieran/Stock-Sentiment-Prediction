@@ -7,8 +7,7 @@ Outputs:
 - data/processed/macro_monthly.parquet
 - data/processed/macro_monthly.csv
 
-The monthly file is the one intended for joining into the DeepSeek + LTN
-article dataset by article month.
+The monthly file is intended for joining into the article dataset by month.
 """
 
 from __future__ import annotations
