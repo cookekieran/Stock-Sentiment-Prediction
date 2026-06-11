@@ -1,4 +1,7 @@
-  # Market Regime Experiment Workflow
+# Historical Model Workflows
+
+The canonical final study is now documented in the repository root `README.md`.
+This file retains commands for earlier experiments and supporting ablations.
 
 Run these commands from the project root.
 

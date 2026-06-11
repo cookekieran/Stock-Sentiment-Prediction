@@ -1,5 +1,9 @@
 # End-to-End Neuro-Symbolic Pipeline
 
+Status: optional GPU extension. The final local study did not run this model
+because the available runtime had no CUDA device. It must pass the documented
+tiny GPU smoke test before being included in any reported comparison.
+
 This folder contains the separate research path for a jointly trained model:
 
 ```text
