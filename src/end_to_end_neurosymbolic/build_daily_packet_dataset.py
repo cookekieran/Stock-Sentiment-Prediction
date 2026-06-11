@@ -1,4 +1,4 @@
-"""Build daily text packets for joint Qwen, GRU, and LTN training."""
+"""Build leakage-safe daily packets for transformer-context and LTN training."""
 
 from __future__ import annotations
 

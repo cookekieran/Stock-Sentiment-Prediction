@@ -4,7 +4,7 @@ Extract ticker/day contextual market driver predicates with DeepSeek.
 This is the dissertation-facing DeepSeek interpreter. It groups all available
 news for a ticker and trading day into one packet, asks DeepSeek to interpret the
 daily context, and writes one structured predicate row per ticker/day. The output
-is intended to feed the daily latent-state GRU and LTN-style logic losses.
+can feed transformer-context baselines and LTN-style logic losses.
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ This converts article-level rows into one row per ticker/trading day. News is
 aggregated into gradual daily signals, then joined with macro and known market
 state features. Forward-looking return fields are deliberately excluded from the
 feature set; they remain useful for labels/diagnostics but should not drive the
-hidden state.
+contextual market-state representation.
 """
 
 from __future__ import annotations
