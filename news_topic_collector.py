@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, text
 from admin import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
 
 
-TOPIC = "technology"
+TOPIC = "economy_macro"
 
 DB_URL = f'postgresql://postgres:{POSTGRES_PASS}@localhost:5432/stock_market'
 engine = create_engine(DB_URL)
@@ -110,7 +110,7 @@ for i in range(25):
         break
     
     # request n days at a time
-    n = 15
+    n = 1
     window_end = min(current_pointer + timedelta(days=n), end_goal)
 
     t_from = current_pointer.strftime("%Y%m%dT%H%M")
