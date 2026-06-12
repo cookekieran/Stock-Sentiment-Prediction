@@ -1,9 +1,0 @@
-torch
-transformers>=4.37
-peft
-accelerate
-bitsandbytes
-pandas
-pyarrow
-numpy
-scikit-learn
