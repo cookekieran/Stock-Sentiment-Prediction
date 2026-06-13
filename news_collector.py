@@ -13,7 +13,7 @@ from admin import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
 # CURRENT_TICKER = ALL_TICKERS[ticker_index]
 
 # manual override
-CURRENT_TICKER = "META"
+CURRENT_TICKER = "TSLA"
 day_of_year = datetime.now().timetuple().tm_yday
 
 DB_URL = f'postgresql://postgres:{POSTGRES_PASS}@localhost:5432/stock_market'
@@ -117,7 +117,7 @@ for i in range(25):
         break
     
     # request n days at a time
-    n = 10
+    n = 8
     window_end = min(current_pointer + timedelta(days=n), end_goal)
 
     t_from = current_pointer.strftime("%Y%m%dT%H%M")
