@@ -26,7 +26,6 @@ realtime data/
 .npm/
 .ssh/
 .ipython/
-/data/
 /models/
 /outputs/
 /archive/
