@@ -7,14 +7,14 @@ from sqlalchemy import create_engine, text
 from config import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
 
 
-# ALL_TICKERS = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "SPY", "QQQ", "GLD", "SLV", "USO"]
-# day_of_year = datetime.now().timetuple().tm_yday
-# ticker_index = day_of_year % len(ALL_TICKERS)
-# CURRENT_TICKER = ALL_TICKERS[ticker_index]
+ALL_TICKERS = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "SPY", "QQQ", "GLD", "SLV", "USO"]
+day_of_year = datetime.now().timetuple().tm_yday
+ticker_index = day_of_year % len(ALL_TICKERS)
+CURRENT_TICKER = ALL_TICKERS[ticker_index]
 
 # manual override
-CURRENT_TICKER = "TSLA"
-day_of_year = datetime.now().timetuple().tm_yday
+# CURRENT_TICKER = "TSLA"
+# day_of_year = datetime.now().timetuple().tm_yday
 
 DB_URL = f'postgresql://postgres:{POSTGRES_PASS}@localhost:5432/stock_market'
 engine = create_engine(DB_URL)
