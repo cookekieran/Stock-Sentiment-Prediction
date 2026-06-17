@@ -41,29 +41,30 @@ Alpha Vantage news
 ## Repository Structure
 
 ```text
-data_pipeline/
-  config.py                      # environment variable loading
-  collect_news_by_ticker.py      # ticker-based Alpha Vantage news backfill
-  collect_news_by_topic.py       # topic-based Alpha Vantage news backfill
-  backfill_news_windows.py       # repair/backfill utility for missed windows
-  build_clean_news_tables.py     # PostgreSQL -> cleaned article/ticker/topic tables
-  transform_alpha_vantage.py     # shared Alpha Vantage transformation logic
+data/
+  pipeline/
+    config.py                      # environment variable loading
+    collect_news_by_ticker.py      # ticker-based Alpha Vantage news backfill
+    collect_news_by_topic.py       # topic-based Alpha Vantage news backfill
+    backfill_news_windows.py       # repair/backfill utility for missed windows
+    build_clean_news_tables.py     # PostgreSQL -> cleaned article/ticker/topic tables
+    transform_alpha_vantage.py     # shared Alpha Vantage transformation logic
+
+  inspect_data/
+    exploratory notebooks for checking uploaded/private datasets
 
 notebooks/
   news_event_notebook_gemini.ipynb
   news_event_notebook_deepseek.ipynb
-
-inspect_data/
-  exploratory notebooks for checking uploaded datasets
 ```
 
 The separation is intentional:
 
-- `data_pipeline/` contains scripts used to collect, store, clean, and export
+- `data/pipeline/` contains scripts used to collect, store, clean, and export
   data.
+- `data/inspect_data/` contains audit notebooks used to inspect saved datasets.
 - `notebooks/` contains the research layer: event extraction, event memory, and
   predicate generation.
-- `inspect_data/` contains audit notebooks used to inspect saved datasets.
 
 ## Data Pipeline
 
@@ -73,12 +74,13 @@ larger local dataset over multiple sessions without paid access.
 
 The basic flow is:
 
-1. `collect_news_by_ticker.py` or `collect_news_by_topic.py` requests a small
-   date window from Alpha Vantage.
+1. `data/pipeline/collect_news_by_ticker.py` or
+   `data/pipeline/collect_news_by_topic.py` requests a small date window from
+   Alpha Vantage.
 2. Raw article fields, ticker sentiment, and topic metadata are inserted into a
    local PostgreSQL table.
-3. `build_clean_news_tables.py` loads the stored rows and uses
-   `transform_alpha_vantage.py` to create:
+3. `data/pipeline/build_clean_news_tables.py` loads the stored rows and uses
+   `data/pipeline/transform_alpha_vantage.py` to create:
    - a main article table;
    - exploded ticker metadata;
    - exploded topic metadata.
