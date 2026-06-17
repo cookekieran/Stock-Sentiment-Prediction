@@ -3,12 +3,12 @@ import pandas as pd
 import time
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
-from admin import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
+from config import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
 
 DB_URL = f'postgresql://postgres:{POSTGRES_PASS}@localhost:5432/stock_market'
 engine = create_engine(DB_URL)
 
-def repair_ticker(ticker, start_date_str, end_date_str, days_per_step=30):
+def repair_ticker(ticker, start_date_str, end_date_str, days_per_step=2):
    
     current_date = datetime.strptime(start_date_str, "%Y-%m-%d")
     final_date = datetime.strptime(end_date_str, "%Y-%m-%d")

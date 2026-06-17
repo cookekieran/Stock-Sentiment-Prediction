@@ -4,7 +4,7 @@ import time
 import os
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
-from admin import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
+from config import POSTGRES_PASS, ALPHA_VANTAGE_API_KEY
 
 
 # ALL_TICKERS = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "SPY", "QQQ", "GLD", "SLV", "USO"]

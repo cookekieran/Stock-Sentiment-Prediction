@@ -2,7 +2,7 @@ import psycopg2
 import pandas as pd
 import os
 from dotenv import load_dotenv
-from functions import process_alpha_vantage_data
+from transform_alpha_vantage import process_alpha_vantage_data
 
 load_dotenv()
 

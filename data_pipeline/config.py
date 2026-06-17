@@ -9,14 +9,5 @@ def get_env_var(key):
         raise EnvironmentError(f"{key} is not set.")
     return value
 
-ALPACA_API_KEY=get_env_var("ALPACA_API_KEY")
-ALPACA_SECRET_KEY=get_env_var("ALPACA_SECRET_CODE")
-
 ALPHA_VANTAGE_API_KEY=get_env_var("ALPHA_VANTAGE_API_KEY")
-
-
 POSTGRES_PASS=get_env_var("POSTGRES_PASS")
-
-DB_HOST=get_env_var("DB_HOST")
-DB_USER=get_env_var("DB_USER")
-DB_PASSWORD=get_env_var("DB_PASSWORD")
