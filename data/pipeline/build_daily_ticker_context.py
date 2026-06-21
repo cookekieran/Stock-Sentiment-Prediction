@@ -11,6 +11,8 @@ OUTPUT_PATH = PROJECT_ROOT / "data" / "ticker_daily_context.parquet"
 
 load_dotenv(PROJECT_ROOT / ".env")
 HF_TOKEN = os.getenv("HF_TOKEN")
+RETURN_WINDOWS = (1, 5, 20, 45, 60, 90, 120)
+STATE_WINDOWS = (20, 60, 90)
 
 
 def load_parquet(repo_id, filename):
@@ -37,36 +39,37 @@ earnings = load_parquet(
 prices["date"] = pd.to_datetime(prices["date"])
 prices = prices.sort_values(["ticker", "date"])
 
-prices["stock_return_1d"] = prices.groupby("ticker")["adj_close"].pct_change()
-prices["stock_return_5d"] = prices.groupby("ticker")["adj_close"].pct_change(5)
-prices["stock_return_20d"] = prices.groupby("ticker")["adj_close"].pct_change(20)
-prices["stock_volatility_20d"] = prices.groupby("ticker")["stock_return_1d"].transform(
-    lambda returns: returns.rolling(20).std()
-)
-prices["relative_volume_20d"] = prices.groupby("ticker")["volume"].transform(
-    lambda volume: volume / volume.rolling(20).mean().shift(1)
-)
-prices["distance_from_20d_high"] = prices.groupby("ticker")["adj_close"].transform(
-    lambda close: close / close.rolling(20).max() - 1
-)
-prices["distance_from_20d_low"] = prices.groupby("ticker")["adj_close"].transform(
-    lambda close: close / close.rolling(20).min() - 1
-)
+for days in RETURN_WINDOWS:
+    prices[f"stock_return_{days}d"] = prices.groupby("ticker")["adj_close"].pct_change(days)
+
+for days in STATE_WINDOWS:
+    prices[f"stock_volatility_{days}d"] = prices.groupby("ticker")["stock_return_1d"].transform(
+        lambda returns: returns.rolling(days).std()
+    )
+    prices[f"relative_volume_{days}d"] = prices.groupby("ticker")["volume"].transform(
+        lambda volume: volume / volume.rolling(days).mean().shift(1)
+    )
+    prices[f"distance_from_{days}d_high"] = prices.groupby("ticker")["adj_close"].transform(
+        lambda close: close / close.rolling(days).max() - 1
+    )
+    prices[f"distance_from_{days}d_low"] = prices.groupby("ticker")["adj_close"].transform(
+        lambda close: close / close.rolling(days).min() - 1
+    )
 prices["distance_from_20d_moving_average"] = prices.groupby("ticker")["adj_close"].transform(
     lambda close: close / close.rolling(20).mean() - 1
 )
 
 market["date"] = pd.to_datetime(market["date"])
 market = market.sort_values("date")
-for days in (1, 5, 20):
+for days in RETURN_WINDOWS:
     market[f"sp500_return_{days}d"] = market["adj_close"].pct_change(days)
 
 context = prices.merge(
-    market[["date", "sp500_return_1d", "sp500_return_5d", "sp500_return_20d"]],
+    market[["date", *[f"sp500_return_{days}d" for days in RETURN_WINDOWS]]],
     on="date",
     how="left",
 )
-for days in (1, 5, 20):
+for days in RETURN_WINDOWS:
     context[f"stock_minus_sp500_return_{days}d"] = (
         context[f"stock_return_{days}d"] - context[f"sp500_return_{days}d"]
     )
@@ -152,20 +155,14 @@ context = context.rename(columns={
 context_columns = [
     "ticker",
     "price_data_as_of",
-    "stock_return_1d",
-    "stock_return_5d",
-    "stock_return_20d",
-    "stock_volatility_20d",
-    "relative_volume_20d",
-    "distance_from_20d_high",
-    "distance_from_20d_low",
+    *[f"stock_return_{days}d" for days in RETURN_WINDOWS],
+    *[f"stock_volatility_{days}d" for days in STATE_WINDOWS],
+    *[f"relative_volume_{days}d" for days in STATE_WINDOWS],
+    *[f"distance_from_{days}d_high" for days in STATE_WINDOWS],
+    *[f"distance_from_{days}d_low" for days in STATE_WINDOWS],
     "distance_from_20d_moving_average",
-    "sp500_return_1d",
-    "sp500_return_5d",
-    "sp500_return_20d",
-    "stock_minus_sp500_return_1d",
-    "stock_minus_sp500_return_5d",
-    "stock_minus_sp500_return_20d",
+    *[f"sp500_return_{days}d" for days in RETURN_WINDOWS],
+    *[f"stock_minus_sp500_return_{days}d" for days in RETURN_WINDOWS],
     "days_since_last_earnings_report",
     "latest_reported_eps",
     "latest_estimated_eps",
