@@ -32,3 +32,8 @@ realtime data/
 old/
 inspect_alphavantage_market_news.ipynb
 news_event_notebook.ipynb
+
+# superseded/unused pipeline scripts, not part of the final study
+data/pipeline/collect_news_by_topic.py
+data/pipeline/fetch_mag7_alphavantage_earnings_dates.py
+data/pipeline/fetch_mag7_alphavantage_fundamentals.py
