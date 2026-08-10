@@ -1,20 +1,12 @@
 """
-Resumable MAG7 primary article-event label extraction.
+Script for Magnificent 7 article-event label extraction.
 
-Run in the University GPU container.
+Loads MAG7 news from Hugging Face, classifies each ticker-article into a
+primary company event label, and maps each kept label to a leakage-safe
+trading event_date.
 
-This script:
-1. Loads MAG7 AlphaVantage news from Hugging Face.
-2. Classifies each ticker-article into one primary direct company event label.
-3. Maps each kept article-event label to a leakage-safe trading event_date.
-
-Methodological unit:
-    ticker-article -> primary article-event label
-
-Output: article_event_labels.parquet, one row per kept ticker-article label.
-This is the file consumed directly by the modelling notebook. (An earlier
-version of this script also built a daily ticker news-packet aggregation;
-that path has been removed since the current notebook does not use it.)
+Output: article_event_labels.parquet, one row per kept ticker-article label,
+consumed directly by the modelling notebook. 
 """
 
 from __future__ import annotations
