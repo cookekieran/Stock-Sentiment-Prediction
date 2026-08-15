@@ -32,6 +32,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Stale labels kept unchanged to match the archived final news processing metadata.
 SCRIPT_VERSION = "mag7_daily_article_event_packet_extraction_v6"
 PROMPT_VERSION = "two_shot_market_reaction_article_event_prompt_v7"
 TAXONOMY_VERSION = "expanded_mag7_event_taxonomy_v5"
