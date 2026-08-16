@@ -1,25 +1,9 @@
 """
-Evaluate MAG7 market-reaction relevance prompt variants from 0-shot to 6-shot.
+Evaluates 0-shot through 6-shot variants of the MAG7 market-reaction
+relevance prompt against a manually labelled audit set. 
 
-This script is only for prompt selection. It does not build event packets.
-
-Manual labels are treated as binary:
-- Relevant -> keep=true
-- Not Relevant -> keep=false
-
-The target definition is:
-A headline is relevant only if it is likely to describe a firm-specific event
-that could plausibly cause a market reaction for the target MAG7 ticker.
-
-Rule alignment note: market_reaction_rules() has been updated to match the
-hard-rejection rules used in the production classifier
-(1_run_mag7_strict_event_study_v2.py), specifically the same-MAG7-company
-attribution rule and the third-party-liability exception. This evaluation
-still judges on headline-only text (the production classifier also sees the
-article summary), and metrics computed before this change used a version of
-the prompt that omitted these rules. Re-run this script to regenerate
-predictions and metrics under the aligned prompt before citing F1/precision/
-recall numbers in the dissertation.
+A headline counts as relevant only if it plausibly describes a firm-specific
+event that could move the target MAG7 ticker. 
 """
 
 from __future__ import annotations
@@ -715,7 +699,7 @@ def main() -> None:
     ranked_split = development_metrics if not development_metrics.empty else metrics[metrics["split"] == "all"].copy()
     top3 = ranked_split.sort_values("f1", ascending=False).head(3)
 
-    print("\nTop 3 variants by F1, with bootstrap 95% CIs (use this to judge whether the winner is clearly separable from the runner-up):")
+    print("\nTop 3 variants by F1, with bootstrap 95% CIs:")
     print(
         top3[
             ["prompt_variant", "n", "f1", "f1_ci_low", "f1_ci_high", "precision", "recall"]
