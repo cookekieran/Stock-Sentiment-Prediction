@@ -1,48 +1,20 @@
-from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import ast
 import hashlib
 
-def get_end_date(start_day, desired_timeframe_in_days=1):
-    start_date = datetime.strptime(start_day, "%Y-%m-%d")
-    end_date = start_date + timedelta(days=desired_timeframe_in_days)
-    return start_date, end_date
-
 def process_alpha_vantage_data(input_df: pd.DataFrame):
-    """
-    ETL for Alpha Vantage articles.
-
-    Outputs:
-    1. df_articles_main
-    2. df_tickers_metadata
-    3. df_topics_metadata
-
-    Guarantees:
-    - Stable article_id (not index-based)
-    - Stable article_uid (hash-based, dedupe-safe)
-    - No silent data loss (parse failures are tracked)
-    - Deterministic joins across exploded tables
-    """
-
     working_df = input_df.copy()
 
-    # -----------------------------------------------------------------
-    # Set Article ID
-    # -----------------------------------------------------------------
     working_df = working_df.reset_index(drop=True)
     working_df["article_id"] = np.arange(len(working_df))
 
-    # create stable unique identifier for deduplication + HF uploads
     def make_uid(row):
         base = f"{row.get('url','')}|{row.get('time_published','')}|{row.get('title','')}"
         return hashlib.md5(base.encode()).hexdigest()
 
     working_df["article_uid"] = working_df.apply(make_uid, axis=1)
 
-    # -----------------------------------------------------------------
-    # Main Articles Table
-    # -----------------------------------------------------------------
     print("Creating main articles table...")
 
     target_columns = [
@@ -63,9 +35,6 @@ def process_alpha_vantage_data(input_df: pd.DataFrame):
     if "summary" in df_articles_main.columns:
         df_articles_main["summary"] = df_articles_main["summary"].fillna("").astype(str)
 
-    # -----------------------------------------------------------------
-    # DATA PARSER
-    # -----------------------------------------------------------------
     def parse_json_array(val):
         if val is None or pd.isna(val) or val == "":
             return [], False
@@ -81,9 +50,6 @@ def process_alpha_vantage_data(input_df: pd.DataFrame):
 
         return [], True
 
-    # -----------------------------------------------------------------
-    # TICKER METADATA (table 2)
-    # -----------------------------------------------------------------
     print("Creating ticker metadata table...")
 
     if "ticker_sentiment" in working_df.columns:
@@ -134,9 +100,6 @@ def process_alpha_vantage_data(input_df: pd.DataFrame):
     else:
         df_tickers_metadata = pd.DataFrame(columns=["article_id", "article_uid"])
 
-    # -----------------------------------------------------------------
-    # TOPIC METADATA (table 3)
-    # -----------------------------------------------------------------
     print("Creating topic metadata table...")
 
     if "topics" in working_df.columns:
@@ -184,12 +147,6 @@ def process_alpha_vantage_data(input_df: pd.DataFrame):
     else:
         df_topics_metadata = pd.DataFrame(columns=["article_id", "article_uid"])
 
-    # -----------------------------------------------------------------
-    # SUMMARY
-    # -----------------------------------------------------------------
-    print("\nPipeline complete")
-    print(f"   Articles  : {len(df_articles_main)}")
-    print(f"   Tickers   : {len(df_tickers_metadata)}")
-    print(f"   Topics    : {len(df_topics_metadata)}\n")
+    print(f"Done: {len(df_articles_main)} articles, {len(df_tickers_metadata)} ticker rows, {len(df_topics_metadata)} topic rows")
 
     return df_articles_main, df_tickers_metadata, df_topics_metadata
