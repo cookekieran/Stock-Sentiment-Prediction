@@ -9,6 +9,7 @@ __pycache__/
 *.bat
 scrap.py 
 *.csv
+!data/headline_filtering_manual_audit.csv
 *.parquet
 *.txt
 !requirements.txt
