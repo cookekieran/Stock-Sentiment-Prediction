@@ -33,6 +33,7 @@ realtime data/
 old/
 inspect_alphavantage_market_news.ipynb
 news_event_notebook.ipynb
+notebooks/FINAL_v3__17_mag7_article_event_label_interaction_clean_no_robust/
 
 # superseded/unused pipeline scripts, not part of the final study
 data/pipeline/collect_news_by_topic.py
